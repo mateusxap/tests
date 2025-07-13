@@ -9,7 +9,6 @@ class GanttChartApp:
         self.root.title("Gantt Chart - Zoom & Pan")
         self.root.minsize(900, 600)
 
-        # --- Данные для отрисовки и масштабирования ---
         self.record_colors = {}
         self.color_palette = [
             '#4e79a7', '#f28e2b', '#e15759', '#76b7b2', '#59a14f',
@@ -17,22 +16,20 @@ class GanttChartApp:
         ]
         self.DEFAULT_FONT_SIZES = {
             'layer_name': 10, 'axis_label': 8, 'bar_label': 9,
-            'legend_title': 12, 'legend_item': 10
+            'legend_title': 12, 'legend_item': 10,
+            'time_marker': 7  # НОВОЕ: Шрифт для временных меток над блоками
         }
         self.font_sizes = self.DEFAULT_FONT_SIZES.copy()
 
-        # --- Создание виджетов ---
         self.main_frame = ttk.Frame(self.root, padding="10")
         self.main_frame.pack(fill=tk.BOTH, expand=True)
 
-        # --- Верхняя панель управления ---
         top_panel = ttk.Frame(self.main_frame)
         top_panel.pack(fill=tk.X, pady=5)
 
         self.start_button = ttk.Button(top_panel, text="Start / Refresh", command=self.update_chart)
         self.start_button.pack(side=tk.LEFT, padx=(0, 20))
 
-        # --- Радиокнопки для выбора режима ---
         self.mode = tk.StringVar(value="Default")
         mode_frame = ttk.LabelFrame(top_panel, text="Display Mode")
         mode_frame.pack(side=tk.LEFT)
@@ -41,11 +38,9 @@ class GanttChartApp:
         ttk.Radiobutton(mode_frame, text="Compact (by Layer)", variable=self.mode, value="LayerCompact", command=self.update_chart).pack(side=tk.LEFT, padx=5)
         ttk.Radiobutton(mode_frame, text="Compact (Global)", variable=self.mode, value="GlobalCompact", command=self.update_chart).pack(side=tk.LEFT, padx=5)
 
-        # --- Холст для рисования ---
         self.canvas = tk.Canvas(self.main_frame, bg='white')
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # --- Привязка событий мыши ---
         self.canvas.bind("<ButtonPress-1>", self.move_start)
         self.canvas.bind("<B1-Motion>", self.move_move)
         self.canvas.bind("<MouseWheel>", self._on_mousewheel)
@@ -54,7 +49,6 @@ class GanttChartApp:
 
         self.update_chart()
 
-    # --- Методы для панорамирования и зума ---
     def move_start(self, event): self.canvas.scan_mark(event.x, event.y)
     def move_move(self, event): self.canvas.scan_dragto(event.x, event.y, gain=1)
 
@@ -78,7 +72,6 @@ class GanttChartApp:
                 font_style = "bold" if key in ['bar_label', 'legend_title'] else ""
                 self.canvas.itemconfigure(item_id, font=(font_name, int(size), font_style))
 
-    # --- Методы для работы с данными и отрисовки ---
     def get_record_color(self, record_id):
         if record_id not in self.record_colors:
             self.record_colors[record_id] = self.color_palette[len(self.record_colors) % len(self.color_palette)]
@@ -131,12 +124,8 @@ class GanttChartApp:
         if bbox: self.canvas.config(scrollregion=bbox)
 
     def _calculate_global_shifts(self, data):
-        """Вычисляет глобальные простои и создает функцию для расчета сдвига."""
         if not data: return lambda t: 0, 0
-
-        # 1. Сливаем все интервалы в "занятые" блоки
         intervals = sorted([(row[1], row[2]) for row in data])
-        
         merged = []
         if intervals:
             current_start, current_end = intervals[0]
@@ -148,18 +137,16 @@ class GanttChartApp:
                     current_start, current_end = next_start, next_end
             merged.append((current_start, current_end))
 
-        # 2. Находим "простои" между занятыми блоками
         gaps = []
         total_gap_time = 0
         for i in range(len(merged) - 1):
             gap_start = merged[i][1]
             gap_end = merged[i+1][0]
             gap_duration = gap_end - gap_start
-            if gap_duration > 1e-9: # Используем малое число для сравнения с плавающей точкой
+            if gap_duration > 1e-9:
                 gaps.append({'end_of_gap': gap_end, 'duration': gap_duration})
                 total_gap_time += gap_duration
         
-        # 3. Создаем функцию, которая вернет сдвиг для любой точки времени
         def get_shift_for_time(t):
             shift = 0
             for gap in gaps:
@@ -170,53 +157,38 @@ class GanttChartApp:
         return get_shift_for_time, total_gap_time
 
     def _draw_global_compact_mode(self, data, tasks_by_layer, ordered_layers, all_records):
-        """Рисует диаграмму, убирая ВСЕ простои на временной шкале."""
         get_shift, total_gap_time = self._calculate_global_shifts(data)
-
         min_time = min(row[1] for row in data)
         max_time = max(row[2] for row in data)
         total_duration = (max_time - min_time - total_gap_time) if (max_time > min_time) else 1
-
-        # Используем общую функцию отрисовки, передавая ей функцию сдвига
         self._draw_common_elements(tasks_by_layer, ordered_layers, all_records, min_time, total_duration, get_shift_func=get_shift)
         self._draw_legend(data, ordered_layers, len(all_records))
 
     def _draw_layer_compact_mode(self, data, tasks_by_layer, ordered_layers, all_records):
-        """Рисует диаграмму, убирая простои МЕЖДУ слоями."""
         layer_shifts = {name: 0.0 for name in ordered_layers}
         accumulated_shift = 0.0
         for i in range(1, len(ordered_layers)):
-            prev_layer_name = ordered_layers[i-1]
-            current_layer_name = ordered_layers[i]
-            
+            prev_layer_name, current_layer_name = ordered_layers[i-1], ordered_layers[i]
             max_end_prev = max(t['end'] for t in tasks_by_layer[prev_layer_name])
             min_start_current = min(t['start'] for t in tasks_by_layer[current_layer_name])
-            
             if min_start_current > max_end_prev:
-                gap = min_start_current - max_end_prev
-                accumulated_shift += gap
-            
+                accumulated_shift += (min_start_current - max_end_prev)
             layer_shifts[current_layer_name] = accumulated_shift
-
         min_time = min(row[1] for row in data)
         max_time = max(row[2] for row in data)
         total_duration = (max_time - min_time - accumulated_shift) if (max_time > min_time) else 1
-
         self._draw_common_elements(tasks_by_layer, ordered_layers, all_records, min_time, total_duration, layer_shifts_dict=layer_shifts)
         self._draw_legend(data, ordered_layers, len(all_records))
 
     def _draw_default_mode(self, data, tasks_by_layer, ordered_layers, all_records):
-        """Рисует стандартную диаграмму с реальной временной шкалой."""
         min_time = min(row[1] for row in data)
         max_time = max(row[2] for row in data)
         total_duration = max_time - min_time if max_time > min_time else 1
-        
         self._draw_common_elements(tasks_by_layer, ordered_layers, all_records, min_time, total_duration)
         self._draw_time_axis(min_time, total_duration, ordered_layers, len(all_records))
         self._draw_legend(data, ordered_layers, len(all_records))
 
     def _draw_common_elements(self, tasks_by_layer, ordered_layers, all_records, min_time, total_duration, layer_shifts_dict=None, get_shift_func=None):
-        """Рисует общие для всех режимов элементы: названия слоев и блоки задач."""
         if layer_shifts_dict is None: layer_shifts_dict = defaultdict(float)
         if get_shift_func is None: get_shift_func = lambda t: 0
 
@@ -239,16 +211,11 @@ class GanttChartApp:
             for task in tasks_by_layer[layer_name]:
                 record_id, start, end = task['record_id'], task['start'], task['end']
                 color = self.get_record_color(record_id)
-                
                 v_index = record_to_v_index.get(record_id, 0)
                 y0 = y_lane_start + v_index * (SUB_BAR_HEIGHT + SUB_BAR_PADDING)
                 
-                # Применяем сдвиг в зависимости от режима
                 shift = layer_shifts_dict[layer_name] if layer_shifts_dict else get_shift_func(start)
-                
-                new_start = start - shift
-                new_end = end - shift
-                
+                new_start, new_end = start - shift, end - shift
                 x0 = LEFT_MARGIN + (new_start - min_time) / total_duration * scale_width
                 x1 = LEFT_MARGIN + (new_end - min_time) / total_duration * scale_width
 
@@ -260,6 +227,20 @@ class GanttChartApp:
                     (x0 + x1) / 2, y0 + SUB_BAR_HEIGHT / 2, text=label_text, fill='white',
                     font=("Arial", int(self.font_sizes['bar_label']), "bold"), tags="bar_label_text"
                 )
+
+                # --- НОВОЕ: Добавляем оригинальные временные метки только в режиме GlobalCompact ---
+                if self.mode.get() == "GlobalCompact":
+                    font_size = int(self.font_sizes['time_marker'])
+                    # Метка времени начала
+                    self.canvas.create_text(
+                        x0, y0 - 4, text=f"{start:.2f}", anchor=tk.S,
+                        font=("Arial", font_size), fill="navy", tags="time_marker_text"
+                    )
+                    # Метка времени конца
+                    self.canvas.create_text(
+                        x1, y0 - 4, text=f"{end:.2f}", anchor=tk.S,
+                        font=("Arial", font_size), fill="navy", tags="time_marker_text"
+                    )
 
     def _draw_time_axis(self, min_time, total_duration, layers, num_records):
         PADDING, LEFT_MARGIN, TIMELINE_WIDTH = 60, 200, 2500
