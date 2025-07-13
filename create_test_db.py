@@ -16,7 +16,7 @@ cursor = conn.cursor()
 cursor.execute('''
 CREATE TABLE IF NOT EXISTS Nodes (
     ID INTEGER PRIMARY KEY AUTOINCREMENT,
-    Record INTEGER,
+    RecordID INTEGER,
     SeqNum INTEGER,
     Name TEXT,
     Start REAL,
@@ -41,7 +41,7 @@ for record_id in range(1, records_to_generate + 1):
         end_time = start_time + duration
         
         cursor.execute(
-            "INSERT INTO Nodes (Record, SeqNum, Name, Start, End) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO Nodes (RecordID, SeqNum, Name, Start, End) VALUES (?, ?, ?, ?, ?)",
             (record_id, i, layer_name, start_time, end_time)
         )
         
