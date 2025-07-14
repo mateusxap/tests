@@ -2,6 +2,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import sqlite3
 from collections import defaultdict
+import colorsys # Модуль для работы с цветовыми пространствами
 
 class GanttChartApp:
     def __init__(self, root):
@@ -9,15 +10,15 @@ class GanttChartApp:
         self.root.title("Gantt Chart - Zoom & Pan")
         self.root.minsize(900, 600)
 
-        self.record_colors = {}
+        self.record_base_colors = {}
+        self.task_colors = {}
         self.color_palette = [
             '#4e79a7', '#f28e2b', '#e15759', '#76b7b2', '#59a14f',
             '#edc948', '#b07aa1', '#ff9da7', '#9c755f', '#bab0ac'
         ]
         self.DEFAULT_FONT_SIZES = {
             'layer_name': 10, 'axis_label': 8, 'bar_label': 9,
-            'legend_title': 12, 'legend_item': 10,
-            'time_marker': 7  # НОВОЕ: Шрифт для временных меток над блоками
+            'legend_title': 12, 'legend_item': 10
         }
         self.font_sizes = self.DEFAULT_FONT_SIZES.copy()
 
@@ -35,8 +36,7 @@ class GanttChartApp:
         mode_frame.pack(side=tk.LEFT)
         
         ttk.Radiobutton(mode_frame, text="Default", variable=self.mode, value="Default", command=self.update_chart).pack(side=tk.LEFT, padx=5)
-        ttk.Radiobutton(mode_frame, text="Compact (by Layer)", variable=self.mode, value="LayerCompact", command=self.update_chart).pack(side=tk.LEFT, padx=5)
-        ttk.Radiobutton(mode_frame, text="Compact (Global)", variable=self.mode, value="GlobalCompact", command=self.update_chart).pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(mode_frame, text="Normalized (by Duration)", variable=self.mode, value="Normalized", command=self.update_chart).pack(side=tk.LEFT, padx=5)
 
         self.canvas = tk.Canvas(self.main_frame, bg='white')
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -72,10 +72,49 @@ class GanttChartApp:
                 font_style = "bold" if key in ['bar_label', 'legend_title'] else ""
                 self.canvas.itemconfigure(item_id, font=(font_name, int(size), font_style))
 
-    def get_record_color(self, record_id):
-        if record_id not in self.record_colors:
-            self.record_colors[record_id] = self.color_palette[len(self.record_colors) % len(self.color_palette)]
-        return self.record_colors[record_id]
+    def _get_base_color_for_record(self, record_id):
+        if record_id not in self.record_base_colors:
+            self.record_base_colors[record_id] = self.color_palette[len(self.record_base_colors) % len(self.color_palette)]
+        return self.record_base_colors[record_id]
+
+    def get_color_for_task(self, record_id, layer_index, total_layers):
+        """
+        ИЗМЕНЕНИЕ: Возвращает цвет для задачи, чередуя темные и светлые оттенки
+        для каждого следующего слоя.
+        """
+        cache_key = (record_id, layer_index)
+        if cache_key in self.task_colors:
+            return self.task_colors[cache_key]
+
+        base_hex = self._get_base_color_for_record(record_id)
+        base_hex = base_hex.lstrip('#')
+        rgb_normalized = tuple(int(base_hex[i:i+2], 16) / 255.0 for i in (0, 2, 4))
+        h, l, s = colorsys.rgb_to_hls(*rgb_normalized)
+
+        # --- НОВАЯ ЛОГИКА ЧЕРЕДОВАНИЯ ---
+        BASE_LIGHTNESS_MOD = 0.15  # Максимальное отклонение от базовой светлоты
+        VARIATION_STEP = 0.04      # Шаг, на который каждая пара оттенков приближается к центру
+
+        # Определяем, к какой паре (темный/светлый) относится слой
+        pair_index = layer_index // 2
+
+        # Четные слои (0, 2, 4...) делаем темнее
+        if layer_index % 2 == 0:
+            # Каждая следующая пара темных будет чуть светлее предыдущей
+            lightness_mod = -BASE_LIGHTNESS_MOD + (pair_index * VARIATION_STEP)
+        # Нечетные слои (1, 3, 5...) делаем светлее
+        else:
+            # Каждая следующая пара светлых будет чуть темнее предыдущей
+            lightness_mod = BASE_LIGHTNESS_MOD - (pair_index * VARIATION_STEP)
+        
+        # Применяем модификатор и ограничиваем значения, чтобы не получить чисто черный/белый
+        l = max(0.1, min(0.9, l + lightness_mod))
+        # --- КОНЕЦ НОВОЙ ЛОГИКИ ---
+
+        r, g, b = colorsys.hls_to_rgb(h, l, s)
+        final_hex = f'#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}'
+        self.task_colors[cache_key] = final_hex
+        return final_hex
 
     def fetch_data_from_db(self):
         try:
@@ -91,6 +130,9 @@ class GanttChartApp:
 
     def update_chart(self):
         self.font_sizes = self.DEFAULT_FONT_SIZES.copy()
+        self.record_base_colors.clear()
+        self.task_colors.clear()
+        
         data = self.fetch_data_from_db()
         if data:
             self.draw_gantt(data)
@@ -115,86 +157,34 @@ class GanttChartApp:
         mode = self.mode.get()
         if mode == "Default":
             self._draw_default_mode(data, tasks_by_layer, ordered_layers, all_records)
-        elif mode == "LayerCompact":
-            self._draw_layer_compact_mode(data, tasks_by_layer, ordered_layers, all_records)
-        elif mode == "GlobalCompact":
-            self._draw_global_compact_mode(data, tasks_by_layer, ordered_layers, all_records)
+        elif mode == "Normalized":
+            self._draw_normalized_mode(data, tasks_by_layer, ordered_layers, all_records)
         
         bbox = self.canvas.bbox("all")
         if bbox: self.canvas.config(scrollregion=bbox)
-
-    def _calculate_global_shifts(self, data):
-        if not data: return lambda t: 0, 0
-        intervals = sorted([(row[1], row[2]) for row in data])
-        merged = []
-        if intervals:
-            current_start, current_end = intervals[0]
-            for next_start, next_end in intervals[1:]:
-                if next_start <= current_end:
-                    current_end = max(current_end, next_end)
-                else:
-                    merged.append((current_start, current_end))
-                    current_start, current_end = next_start, next_end
-            merged.append((current_start, current_end))
-
-        gaps = []
-        total_gap_time = 0
-        for i in range(len(merged) - 1):
-            gap_start = merged[i][1]
-            gap_end = merged[i+1][0]
-            gap_duration = gap_end - gap_start
-            if gap_duration > 1e-9:
-                gaps.append({'end_of_gap': gap_end, 'duration': gap_duration})
-                total_gap_time += gap_duration
-        
-        def get_shift_for_time(t):
-            shift = 0
-            for gap in gaps:
-                if t >= gap['end_of_gap']:
-                    shift += gap['duration']
-            return shift
-            
-        return get_shift_for_time, total_gap_time
-
-    def _draw_global_compact_mode(self, data, tasks_by_layer, ordered_layers, all_records):
-        get_shift, total_gap_time = self._calculate_global_shifts(data)
-        min_time = min(row[1] for row in data)
-        max_time = max(row[2] for row in data)
-        total_duration = (max_time - min_time - total_gap_time) if (max_time > min_time) else 1
-        self._draw_common_elements(tasks_by_layer, ordered_layers, all_records, min_time, total_duration, get_shift_func=get_shift)
-        self._draw_legend(data, ordered_layers, len(all_records))
-
-    def _draw_layer_compact_mode(self, data, tasks_by_layer, ordered_layers, all_records):
-        layer_shifts = {name: 0.0 for name in ordered_layers}
-        accumulated_shift = 0.0
-        for i in range(1, len(ordered_layers)):
-            prev_layer_name, current_layer_name = ordered_layers[i-1], ordered_layers[i]
-            max_end_prev = max(t['end'] for t in tasks_by_layer[prev_layer_name])
-            min_start_current = min(t['start'] for t in tasks_by_layer[current_layer_name])
-            if min_start_current > max_end_prev:
-                accumulated_shift += (min_start_current - max_end_prev)
-            layer_shifts[current_layer_name] = accumulated_shift
-        min_time = min(row[1] for row in data)
-        max_time = max(row[2] for row in data)
-        total_duration = (max_time - min_time - accumulated_shift) if (max_time > min_time) else 1
-        self._draw_common_elements(tasks_by_layer, ordered_layers, all_records, min_time, total_duration, layer_shifts_dict=layer_shifts)
-        self._draw_legend(data, ordered_layers, len(all_records))
 
     def _draw_default_mode(self, data, tasks_by_layer, ordered_layers, all_records):
         min_time = min(row[1] for row in data)
         max_time = max(row[2] for row in data)
         total_duration = max_time - min_time if max_time > min_time else 1
+        
         self._draw_common_elements(tasks_by_layer, ordered_layers, all_records, min_time, total_duration)
         self._draw_time_axis(min_time, total_duration, ordered_layers, len(all_records))
         self._draw_legend(data, ordered_layers, len(all_records))
 
-    def _draw_common_elements(self, tasks_by_layer, ordered_layers, all_records, min_time, total_duration, layer_shifts_dict=None, get_shift_func=None):
-        if layer_shifts_dict is None: layer_shifts_dict = defaultdict(float)
-        if get_shift_func is None: get_shift_func = lambda t: 0
+    def _draw_normalized_mode(self, data, tasks_by_layer, ordered_layers, all_records):
+        max_task_duration = max((row[2] - row[1]) for row in data) if data else 0
+        total_duration = max_task_duration if max_task_duration > 0 else 1
+        
+        self._draw_common_elements(tasks_by_layer, ordered_layers, all_records, 0, total_duration)
+        self._draw_time_axis(0, total_duration, ordered_layers, len(all_records))
+        self._draw_legend(data, ordered_layers, len(all_records))
 
+    def _draw_common_elements(self, tasks_by_layer, ordered_layers, all_records, scale_min_time, scale_total_duration):
         sorted_records = sorted(list(all_records))
         record_to_v_index = {rec_id: i for i, rec_id in enumerate(sorted_records)}
         num_records = len(sorted_records)
+        total_layers = len(ordered_layers)
 
         PADDING, LEFT_MARGIN, TIMELINE_WIDTH = 60, 200, 2500
         scale_width = TIMELINE_WIDTH
@@ -210,14 +200,19 @@ class GanttChartApp:
             
             for task in tasks_by_layer[layer_name]:
                 record_id, start, end = task['record_id'], task['start'], task['end']
-                color = self.get_record_color(record_id)
+                
+                color = self.get_color_for_task(record_id, i, total_layers)
+                
                 v_index = record_to_v_index.get(record_id, 0)
                 y0 = y_lane_start + v_index * (SUB_BAR_HEIGHT + SUB_BAR_PADDING)
                 
-                shift = layer_shifts_dict[layer_name] if layer_shifts_dict else get_shift_func(start)
-                new_start, new_end = start - shift, end - shift
-                x0 = LEFT_MARGIN + (new_start - min_time) / total_duration * scale_width
-                x1 = LEFT_MARGIN + (new_end - min_time) / total_duration * scale_width
+                if self.mode.get() == "Normalized":
+                    new_start, new_end = 0, end - start
+                else:
+                    new_start, new_end = start, end
+                
+                x0 = LEFT_MARGIN + (new_start - scale_min_time) / scale_total_duration * scale_width
+                x1 = LEFT_MARGIN + (new_end - scale_min_time) / scale_total_duration * scale_width
 
                 self.canvas.create_rectangle(x0, y0, x1, y0 + SUB_BAR_HEIGHT, fill=color, outline='black', width=1)
                 
@@ -227,20 +222,6 @@ class GanttChartApp:
                     (x0 + x1) / 2, y0 + SUB_BAR_HEIGHT / 2, text=label_text, fill='white',
                     font=("Arial", int(self.font_sizes['bar_label']), "bold"), tags="bar_label_text"
                 )
-
-                # --- НОВОЕ: Добавляем оригинальные временные метки только в режиме GlobalCompact ---
-                if self.mode.get() == "GlobalCompact":
-                    font_size = int(self.font_sizes['time_marker'])
-                    # Метка времени начала
-                    self.canvas.create_text(
-                        x0, y0 - 4, text=f"{start:.2f}", anchor=tk.S,
-                        font=("Arial", font_size), fill="navy", tags="time_marker_text"
-                    )
-                    # Метка времени конца
-                    self.canvas.create_text(
-                        x1, y0 - 4, text=f"{end:.2f}", anchor=tk.S,
-                        font=("Arial", font_size), fill="navy", tags="time_marker_text"
-                    )
 
     def _draw_time_axis(self, min_time, total_duration, layers, num_records):
         PADDING, LEFT_MARGIN, TIMELINE_WIDTH = 60, 200, 2500
@@ -275,7 +256,7 @@ class GanttChartApp:
         
         sorted_records = sorted(list(set(row[3] for row in data)))
         for i, record_id in enumerate(sorted_records):
-            color = self.get_record_color(record_id)
+            color = self._get_base_color_for_record(record_id)
             y = legend_y_start + LEGEND_ITEM_HEIGHT + i * LEGEND_ITEM_HEIGHT
             self.canvas.create_rectangle(legend_x, y, legend_x + 20, y + 20, fill=color, outline='black')
             self.canvas.create_text(
