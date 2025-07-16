@@ -6,9 +6,10 @@ from collections import defaultdict
 import numpy as np
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
+from skimage.measure import block_reduce
 
 # =====================================================================================
-#  Новый виджет для визуализации тензора
+#  НОВЫЙ, ИСПРАВЛЕННЫЙ виджет для визуализации тензора с правильной логикой ползунков
 # =====================================================================================
 class TensorViewer(ttk.Frame):
     def __init__(self, parent):
@@ -23,63 +24,52 @@ class TensorViewer(ttk.Frame):
         self.fig = Figure(figsize=(5, 4), dpi=100)
         self.ax = self.fig.add_subplot(111)
         
-        self.canvas = FigureCanvasTkAgg(self.fig, master=self)
+        plot_frame = ttk.Frame(self)
+        plot_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        
+        self.canvas = FigureCanvasTkAgg(self.fig, master=plot_frame)
+        
+        toolbar = NavigationToolbar2Tk(self.canvas, plot_frame)
+        toolbar.update()
+        toolbar.pack(side=tk.BOTTOM, fill=tk.X)
+        
         self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-        # --- ГЛАВНОЕ ИСПРАВЛЕНИЕ: Добавляем стандартную панель инструментов Matplotlib ---
-        # Она содержит логику для панорамирования, зума по области и т.д.
-        toolbar = NavigationToolbar2Tk(self.canvas, self, pack_toolbar=False)
-        toolbar.update()
-        toolbar.pack(side=tk.TOP, fill=tk.X)
+        self.sliders_frame = ttk.Frame(self)
+        self.sliders_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=5)
 
-        # Фрейм для управляющих элементов (кнопки и ползунки)
-        controls_area = ttk.Frame(self)
-        controls_area.pack(side=tk.TOP, fill=tk.X, pady=5)
-
-        # Кнопка сброса вида теперь на панели инструментов, но можно оставить и свою
-        # reset_button = ttk.Button(controls_area, text="Reset View", command=self._reset_view)
-        # reset_button.pack(pady=5)
-
-        # Фрейм для ползунков
-        self.sliders_frame = ttk.Frame(controls_area)
-        self.sliders_frame.pack(fill=tk.X)
-
-        # Привязка зума колесом мыши остается для удобства
         self.canvas.mpl_connect('scroll_event', self._on_zoom)
+        self.canvas.mpl_connect('draw_event', self._on_draw)
+        self.is_drawing = False
 
     def set_tensor(self, tensor_data):
         self.tensor = tensor_data
         self._setup_sliders()
-        self._update_view()
+        self._update_view(is_new_tensor=True)
 
     def _setup_sliders(self):
         for widget in self.sliders_frame.winfo_children():
             widget.destroy()
-        
         self.slice_indices_vars = []
-
-        if self.tensor is None or self.tensor.ndim <= 2:
-            return
-
+        if self.tensor is None or self.tensor.ndim <= 2: return
         num_sliceable_dims = self.tensor.ndim - 2
-        
-        for i in range(num_sliceable_dims):
-            self.slice_indices_vars.append(tk.IntVar(value=0))
-
         for i in range(num_sliceable_dims):
             dim_shape = self.tensor.shape[i]
-            if dim_shape > 1:
-                frame = ttk.Frame(self.sliders_frame)
-                frame.pack(fill=tk.X, padx=5, pady=2)
-                
-                ttk.Label(frame, text=f"Dim {i}:").pack(side=tk.LEFT)
-                var = self.slice_indices_vars[i]
-                scale = ttk.Scale(frame, from_=0, to=dim_shape - 1, orient=tk.HORIZONTAL, variable=var, command=self._on_slider_change)
-                scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-                ttk.Label(frame, textvariable=var, width=4).pack(side=tk.LEFT)
+            var = tk.IntVar(value=0)
+            self.slice_indices_vars.append(var)
+            frame = ttk.Frame(self.sliders_frame)
+            frame.pack(fill=tk.X, padx=5, pady=2)
+            ttk.Label(frame, text=f"Dim {i}:").pack(side=tk.LEFT)
+            scale = ttk.Scale(frame, from_=0, to=dim_shape - 1, orient=tk.HORIZONTAL, variable=var, command=self._on_slider_change)
+            scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+            ttk.Label(frame, textvariable=var, width=4).pack(side=tk.LEFT)
+            if dim_shape <= 1:
+                scale.config(state="disabled")
 
     def _on_slider_change(self, event=None):
-        self._update_view()
+        for var in self.slice_indices_vars:
+            var.set(round(var.get()))
+        self._update_view(is_new_tensor=True)
 
     def _on_zoom(self, event):
         if event.xdata is None or event.ydata is None: return
@@ -94,39 +84,89 @@ class TensorViewer(ttk.Frame):
         self.ax.set_ylim([ydata - new_height * (1 - rel_y), ydata + new_height * rel_y])
         self.canvas.draw_idle()
 
-    def _reset_view(self):
-        if self.current_slice is not None:
-            h, w = self.current_slice.shape
-            self.ax.set_xlim(-0.5, w - 0.5)
-            self.ax.set_ylim(h - 0.5, -0.5)
-            self.canvas.draw_idle()
+    def _on_draw(self, event):
+        if self.is_drawing: return
+        self._update_view(is_new_tensor=False)
 
-    def _update_view(self):
+    # --- ИЗМЕНЕНИЕ: Заменяем самописный пулинг на вызов из библиотеки scikit-image ---
+    def _adaptive_pool(self, data, pool_size):
+        """
+        Выполняет 2D Max Pooling с помощью функции block_reduce из scikit-image.
+        """
+        # block_reduce ожидает кортеж для размера блока
+        block_shape = (pool_size, pool_size)
+        
+        # Защита от ошибки, если данные меньше, чем окно пулинга
+        if data.shape[0] < pool_size or data.shape[1] < pool_size:
+            return data
+
+        # Вызываем функцию, передавая ей наш массив, размер блока и функцию np.max
+        return block_reduce(data, block_size=block_shape, func=np.max)
+
+    def _update_view(self, is_new_tensor=False):
+        if self.is_drawing: return
+        self.is_drawing = True
+
+        if not is_new_tensor:
+            xlim, ylim = self.ax.get_xlim(), self.ax.get_ylim()
+
         self.ax.clear()
 
         if self.tensor is None:
             self.ax.text(0.5, 0.5, "No Tensor Data", ha="center", va="center", transform=self.ax.transAxes)
-            self.ax.set_xticks([])
-            self.ax.set_yticks([])
+            self.ax.set_xticks([]); self.ax.set_yticks([])
             self.canvas.draw()
+            self.is_drawing = False
             return
+
+        if len(self.slice_indices_vars) != self.tensor.ndim - 2:
+            self._setup_sliders()
 
         slicer = tuple(var.get() for var in self.slice_indices_vars)
         self.current_slice = self.tensor[slicer]
+        
+        view_xlim = self.ax.get_xlim() if not is_new_tensor else (-0.5, self.current_slice.shape[1] - 0.5)
+        view_width_data = view_xlim[1] - view_xlim[0]
+        ax_width_pixels = self.ax.get_window_extent().width
+        data_pixels_per_screen_pixel = view_width_data / ax_width_pixels if ax_width_pixels > 0 else 1
+        
+        pool_size = 1
+        if data_pixels_per_screen_pixel > 1.5:
+            pool_size = int(np.ceil(data_pixels_per_screen_pixel))
+        
+        if pool_size > 1:
+            display_data = self._adaptive_pool(self.current_slice, pool_size)
+            title = f"Slice at {slicer} (Pooled {pool_size}x{pool_size})"
+            extent = (-0.5, self.current_slice.shape[1] - 0.5, self.current_slice.shape[0] - 0.5, -0.5)
+        else:
+            display_data = self.current_slice
+            title = f"Slice at {slicer} (Original)"
+            extent = None
 
-        im = self.ax.imshow(self.current_slice, cmap='viridis', interpolation='nearest')
+        im = self.ax.imshow(display_data, cmap='viridis', interpolation='nearest', extent=extent)
         
         if not hasattr(self, 'colorbar') or self.colorbar.ax is None or self.colorbar.ax.figure != self.fig:
              self.colorbar = self.fig.colorbar(im, ax=self.ax)
         else:
             self.colorbar.update_normal(im)
 
-        self.ax.set_title(f"Slice at {slicer}")
-        self._reset_view()
+        self.ax.set_title(title)
+        
+        if is_new_tensor:
+            self._reset_view()
+        else:
+            self.ax.set_xlim(xlim)
+            self.ax.set_ylim(ylim)
 
-# =====================================================================================
-#  Обновленная вкладка для анализа тензоров
-# =====================================================================================
+        self.canvas.draw()
+        self.is_drawing = False
+
+    def _reset_view(self):
+        if self.current_slice is not None:
+            h, w = self.current_slice.shape
+            self.ax.set_xlim(-0.5, w - 0.5)
+            self.ax.set_ylim(h - 0.5, -0.5)
+            self.canvas.draw_idle()
 class TensorTab(ttk.Frame):
     def __init__(self, parent):
         super().__init__(parent)
@@ -196,7 +236,7 @@ class TensorTab(ttk.Frame):
             self.tensor_map[display_name] = {
                 "name": row[0], "record_id": row[1], "tensor_id": row[2],
                 "datatype": row[3], "dims": row[4], 
-                "shape": tuple(s for s in row[5:10] if s > 0),
+                "shape": tuple(s for s in row[5:10] if s > 0 and s is not None),
                 "blob": row[10]
             }
         
@@ -235,261 +275,7 @@ class TensorTab(ttk.Frame):
             arr_1d = np.frombuffer(blob, dtype=dtype)
             return arr_1d.reshape(shape)
         except Exception as e:
-            messagebox.showerror("Tensor Conversion Error", f"Failed to convert tensor '{name}'.\nError: {e}")
-            return None
-
-    def _calculate_and_display_diff(self, name1, name2):
-        tensor1 = self._get_tensor_as_numpy(name1)
-        tensor2 = self._get_tensor_as_numpy(name2)
-
-        if tensor1 is None or tensor2 is None:
-            self.tensor_viewer.set_tensor(None)
-            return
-
-        if tensor1.shape != tensor2.shape:
-            messagebox.showerror("Shape Mismatch", f"Tensors have incompatible shapes.\n"
-                                                   f"{name1}: {tensor1.shape}\n"
-                                                   f"{name2}: {tensor2.shape}")
-            self.tensor_viewer.set_tensor(None)
-            return
-
-        diff_tensor = np.abs(tensor1 - tensor2)
-        self.tensor_viewer.set_tensor(diff_tensor)
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.pack(fill="both", expand=True)
-
-        self.tensor_map = {}
-
-        main_frame = ttk.Frame(self, padding="10")
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-        control_frame = ttk.Frame(main_frame)
-        control_frame.pack(fill=tk.X, pady=(0, 20))
-        
-        load_button = ttk.Button(control_frame, text="Load Tensors from DB", command=self._load_tensors)
-        load_button.pack(side=tk.LEFT)
-
-        selection_frame = ttk.LabelFrame(main_frame, text="Tensor Selection", padding="10")
-        selection_frame.pack(fill=tk.X)
-
-        ttk.Label(selection_frame, text="1. Select First Tensor:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        self.first_tensor_combo = ttk.Combobox(selection_frame, state="readonly", width=50)
-        self.first_tensor_combo.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
-        self.first_tensor_combo.bind("<<ComboboxSelected>>", self._on_first_tensor_select)
-
-        ttk.Label(selection_frame, text="2. Select Second Tensor (for comparison):").grid(row=1, column=0, padx=5, pady=5, sticky="w")
-        self.second_tensor_combo = ttk.Combobox(selection_frame, state="disabled", width=50)
-        self.second_tensor_combo.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
-        self.second_tensor_combo.bind("<<ComboboxSelected>>", self._on_second_tensor_select)
-        
-        selection_frame.columnconfigure(1, weight=1)
-
-        result_frame = ttk.LabelFrame(main_frame, text="Resulting Difference Tensor", padding="10")
-        result_frame.pack(fill=tk.BOTH, expand=True, pady=(20, 0))
-
-        self.tensor_viewer = TensorViewer(result_frame)
-
-    def _load_tensors(self):
-        try:
-            conn = sqlite3.connect('debug.db')
-            cursor = conn.cursor()
-            query = """
-                SELECT
-                    T.Name, N.RecordID, T.ID as TensorID, T.Datatype, T.NumDims,
-                    T.Shape0, T.Shape1, T.Shape2, T.Shape3, T.Shape4, T.Data
-                FROM Tensors T
-                JOIN TensorMap TM ON T.ID = TM.TensorID
-                JOIN Nodes N ON TM.NodeID = N.id
-                WHERE T.Name IS NOT NULL AND T.Name != ''
-                ORDER BY T.Name, N.RecordID
-            """
-            cursor.execute(query)
-            tensor_data = cursor.fetchall()
-            conn.close()
-        except sqlite3.OperationalError as e:
-            messagebox.showerror("Database Error", f"Could not read tensor data from 'debug.db'.\nError: {e}")
-            return
-
-        if not tensor_data:
-            messagebox.showinfo("No Data", "No tensors found in the database.")
-            return
-
-        self.tensor_map.clear()
-        display_names = []
-        for row in tensor_data:
-            display_name = f"{row[0]} (Record: {row[1]})"
-            display_names.append(display_name)
-            self.tensor_map[display_name] = {
-                "name": row[0], "record_id": row[1], "tensor_id": row[2],
-                "datatype": row[3], "dims": row[4], 
-                "shape": tuple(s for s in row[5:10] if s > 0),
-                "blob": row[10]
-            }
-        
-        self.first_tensor_combo['values'] = display_names
-        self.first_tensor_combo.set('')
-        self.second_tensor_combo.set('')
-        self.second_tensor_combo['values'] = []
-        self.second_tensor_combo.config(state="disabled")
-        self.tensor_viewer.set_tensor(None)
-        messagebox.showinfo("Success", f"{len(display_names)} tensors loaded successfully.")
-
-    def _on_first_tensor_select(self, event=None):
-        selected_display_name = self.first_tensor_combo.get()
-        if not selected_display_name: return
-
-        base_name = self.tensor_map[selected_display_name]["name"]
-        compatible_tensors = [dn for dn, info in self.tensor_map.items() if info["name"] == base_name]
-        
-        self.second_tensor_combo['values'] = compatible_tensors
-        self.second_tensor_combo.config(state="readonly")
-        self.second_tensor_combo.set('')
-        self.tensor_viewer.set_tensor(None)
-
-    def _on_second_tensor_select(self, event=None):
-        tensor1_name = self.first_tensor_combo.get()
-        tensor2_name = self.second_tensor_combo.get()
-        if not tensor1_name or not tensor2_name: return
-        self._calculate_and_display_diff(tensor1_name, tensor2_name)
-
-    def _get_tensor_as_numpy(self, name):
-        info = self.tensor_map[name]
-        blob, shape = info['blob'], info['shape']
-        dtype = np.float32 if info['datatype'] == 0 else np.int32
-        
-        try:
-            arr_1d = np.frombuffer(blob, dtype=dtype)
-            return arr_1d.reshape(shape)
-        except Exception as e:
-            messagebox.showerror("Tensor Conversion Error", f"Failed to convert tensor '{name}'.\nError: {e}")
-            return None
-
-    def _calculate_and_display_diff(self, name1, name2):
-        tensor1 = self._get_tensor_as_numpy(name1)
-        tensor2 = self._get_tensor_as_numpy(name2)
-
-        if tensor1 is None or tensor2 is None:
-            self.tensor_viewer.set_tensor(None)
-            return
-
-        if tensor1.shape != tensor2.shape:
-            messagebox.showerror("Shape Mismatch", f"Tensors have incompatible shapes.\n"
-                                                   f"{name1}: {tensor1.shape}\n"
-                                                   f"{name2}: {tensor2.shape}")
-            self.tensor_viewer.set_tensor(None)
-            return
-
-        diff_tensor = np.abs(tensor1 - tensor2)
-        self.tensor_viewer.set_tensor(diff_tensor)
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.pack(fill="both", expand=True)
-
-        self.tensor_map = {}
-
-        main_frame = ttk.Frame(self, padding="10")
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-        control_frame = ttk.Frame(main_frame)
-        control_frame.pack(fill=tk.X, pady=(0, 20))
-        
-        load_button = ttk.Button(control_frame, text="Load Tensors from DB", command=self._load_tensors)
-        load_button.pack(side=tk.LEFT)
-
-        selection_frame = ttk.LabelFrame(main_frame, text="Tensor Selection", padding="10")
-        selection_frame.pack(fill=tk.X)
-
-        ttk.Label(selection_frame, text="1. Select First Tensor:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        self.first_tensor_combo = ttk.Combobox(selection_frame, state="readonly", width=50)
-        self.first_tensor_combo.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
-        self.first_tensor_combo.bind("<<ComboboxSelected>>", self._on_first_tensor_select)
-
-        ttk.Label(selection_frame, text="2. Select Second Tensor (for comparison):").grid(row=1, column=0, padx=5, pady=5, sticky="w")
-        self.second_tensor_combo = ttk.Combobox(selection_frame, state="disabled", width=50)
-        self.second_tensor_combo.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
-        self.second_tensor_combo.bind("<<ComboboxSelected>>", self._on_second_tensor_select)
-        
-        selection_frame.columnconfigure(1, weight=1)
-
-        result_frame = ttk.LabelFrame(main_frame, text="Resulting Difference Tensor", padding="10")
-        result_frame.pack(fill=tk.BOTH, expand=True, pady=(20, 0))
-
-        self.tensor_viewer = TensorViewer(result_frame)
-
-    def _load_tensors(self):
-        try:
-            conn = sqlite3.connect('debug.db')
-            cursor = conn.cursor()
-            query = """
-                SELECT
-                    T.Name, N.RecordID, T.ID as TensorID, T.Datatype, T.NumDims,
-                    T.Shape0, T.Shape1, T.Shape2, T.Shape3, T.Shape4, T.Data
-                FROM Tensors T
-                JOIN TensorMap TM ON T.ID = TM.TensorID
-                JOIN Nodes N ON TM.NodeID = N.id
-                WHERE T.Name IS NOT NULL AND T.Name != ''
-                ORDER BY T.Name, N.RecordID
-            """
-            cursor.execute(query)
-            tensor_data = cursor.fetchall()
-            conn.close()
-        except sqlite3.OperationalError as e:
-            messagebox.showerror("Database Error", f"Could not read tensor data from 'debug.db'.\nError: {e}")
-            return
-
-        if not tensor_data:
-            messagebox.showinfo("No Data", "No tensors found in the database.")
-            return
-
-        self.tensor_map.clear()
-        display_names = []
-        for row in tensor_data:
-            display_name = f"{row[0]} (Record: {row[1]})"
-            display_names.append(display_name)
-            self.tensor_map[display_name] = {
-                "name": row[0], "record_id": row[1], "tensor_id": row[2],
-                "datatype": row[3], "dims": row[4], 
-                "shape": tuple(s for s in row[5:10] if s > 0),
-                "blob": row[10]
-            }
-        
-        self.first_tensor_combo['values'] = display_names
-        self.first_tensor_combo.set('')
-        self.second_tensor_combo.set('')
-        self.second_tensor_combo['values'] = []
-        self.second_tensor_combo.config(state="disabled")
-        self.tensor_viewer.set_tensor(None)
-        messagebox.showinfo("Success", f"{len(display_names)} tensors loaded successfully.")
-
-    def _on_first_tensor_select(self, event=None):
-        selected_display_name = self.first_tensor_combo.get()
-        if not selected_display_name: return
-
-        base_name = self.tensor_map[selected_display_name]["name"]
-        compatible_tensors = [dn for dn, info in self.tensor_map.items() if info["name"] == base_name]
-        
-        self.second_tensor_combo['values'] = compatible_tensors
-        self.second_tensor_combo.config(state="readonly")
-        self.second_tensor_combo.set('')
-        self.tensor_viewer.set_tensor(None)
-
-    def _on_second_tensor_select(self, event=None):
-        tensor1_name = self.first_tensor_combo.get()
-        tensor2_name = self.second_tensor_combo.get()
-        if not tensor1_name or not tensor2_name: return
-        self._calculate_and_display_diff(tensor1_name, tensor2_name)
-
-    def _get_tensor_as_numpy(self, name):
-        info = self.tensor_map[name]
-        blob, shape = info['blob'], info['shape']
-        dtype = np.float32 if info['datatype'] == 0 else np.int32
-        
-        try:
-            arr_1d = np.frombuffer(blob, dtype=dtype)
-            return arr_1d.reshape(shape)
-        except Exception as e:
-            messagebox.showerror("Tensor Conversion Error", f"Failed to convert tensor '{name}'.\nError: {e}")
+            messagebox.showerror("Tensor Conversion Error", f"Failed to convert tensor '{name}'.\nShape: {shape}, Blob size: {len(blob)}\nError: {e}")
             return None
 
     def _calculate_and_display_diff(self, name1, name2):
