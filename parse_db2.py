@@ -20,6 +20,8 @@ class GanttChartApp:
             'legend_title': 12, 'legend_item': 10
         }
         self.font_sizes = self.DEFAULT_FONT_SIZES.copy()
+        
+        self.task_info = {}
 
         # --- Создание виджетов ---
         self.main_frame = ttk.Frame(self.root, padding="10")
@@ -32,7 +34,6 @@ class GanttChartApp:
         self.start_button = ttk.Button(top_panel, text="Start / Refresh", command=self.update_chart)
         self.start_button.pack(side=tk.LEFT, padx=(0, 20))
 
-        # --- Радиокнопки для выбора режима ---
         self.mode = tk.StringVar(value="Default")
         mode_frame = ttk.LabelFrame(top_panel, text="Display Mode")
         mode_frame.pack(side=tk.LEFT)
@@ -40,9 +41,14 @@ class GanttChartApp:
         ttk.Radiobutton(mode_frame, text="Default", variable=self.mode, value="Default", command=self.update_chart).pack(side=tk.LEFT, padx=5)
         ttk.Radiobutton(mode_frame, text="Normalized (by Duration)", variable=self.mode, value="Normalized", command=self.update_chart).pack(side=tk.LEFT, padx=5)
 
-        # --- Холст для рисования ---
+        # --- Информационная панель ---
+        self.info_var = tk.StringVar()
+        info_label = ttk.Label(self.main_frame, textvariable=self.info_var, anchor='w', font=("Arial", 10))
+        info_label.pack(fill=tk.X, pady=(5, 10))
+
+        # --- Холст (без скроллбаров) ---
         self.canvas = tk.Canvas(self.main_frame, bg='white')
-        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.canvas.pack(fill=tk.BOTH, expand=True)
 
         # --- Привязка событий мыши ---
         self.canvas.bind("<ButtonPress-1>", self.move_start)
@@ -50,18 +56,46 @@ class GanttChartApp:
         self.canvas.bind("<MouseWheel>", self._on_mousewheel)
         self.canvas.bind("<Button-4>", self._on_mousewheel)
         self.canvas.bind("<Button-5>", self._on_mousewheel)
+        self.canvas.bind("<ButtonPress-3>", self._handle_right_click)
 
         self.update_chart()
 
-    # --- Методы для панорамирования и зума (без изменений) ---
-    def move_start(self, event): self.canvas.scan_mark(event.x, event.y)
-    def move_move(self, event): self.canvas.scan_dragto(event.x, event.y, gain=1)
+    def _handle_right_click(self, event):
+        """Определяет, был ли клик по задаче или по фону, и действует соответственно."""
+        clicked_ids = self.canvas.find_withtag("current")
+        found_task = False
+        if clicked_ids:
+            item_id = clicked_ids[0]
+            if "task_bar" in self.canvas.gettags(item_id):
+                info = self.task_info.get(item_id)
+                if info:
+                    info_text = (f"Layer: {info['layer']} | "
+                                 f"RecordID: {info['record']} | "
+                                 f"Duration: {info['duration']:.4f}s "
+                                 f"(Original Time: {info['start']:.3f}s - {info['end']:.3f}s)")
+                    self.info_var.set(info_text)
+                    found_task = True
+        if not found_task:
+            self._clear_info_label()
+
+    def _clear_info_label(self, event=None):
+        """Очищает информационную метку и выводит подсказку."""
+        self.info_var.set("Right-click on a bar to see details. Left-click and drag to pan.")
+
+    # --- ИЗМЕНЕНИЕ: Возвращаем старую, интуитивную логику панорамирования ---
+    def move_start(self, event):
+        """Запоминает начальную позицию для перемещения с помощью scan_mark."""
+        self.canvas.scan_mark(event.x, event.y)
+
+    def move_move(self, event):
+        """Перемещает холст вслед за курсором."""
+        self.canvas.scan_dragto(event.x, event.y, gain=1)
 
     def _on_mousewheel(self, event):
         factor = 0
         if event.num == 4 or event.delta > 0: factor = 1.1
         elif event.num == 5 or event.delta < 0: factor = 0.9
-        if factor: self._zoom(factor, event.x, event.y)
+        if factor: self._zoom(factor, self.canvas.canvasx(event.x), self.canvas.canvasy(event.y))
 
     def _zoom(self, factor, x, y):
         self.canvas.scale("all", x, y, factor, factor)
@@ -77,7 +111,7 @@ class GanttChartApp:
                 font_style = "bold" if key in ['bar_label', 'legend_title'] else ""
                 self.canvas.itemconfigure(item_id, font=(font_name, int(size), font_style))
 
-    # --- Методы для работы с данными и отрисовки ---
+    # --- Методы для работы с данными и отрисовки (без изменений) ---
     def get_record_color(self, record_id):
         if record_id not in self.record_colors:
             self.record_colors[record_id] = self.color_palette[len(self.record_colors) % len(self.color_palette)]
@@ -97,6 +131,9 @@ class GanttChartApp:
 
     def update_chart(self):
         self.font_sizes = self.DEFAULT_FONT_SIZES.copy()
+        self.task_info.clear()
+        self._clear_info_label()
+        
         data = self.fetch_data_from_db()
         if data:
             self.draw_gantt(data)
@@ -159,35 +196,28 @@ class GanttChartApp:
         SUB_BAR_HEIGHT, SUB_BAR_PADDING = 20, 5
         LANE_HEIGHT = (SUB_BAR_HEIGHT + SUB_BAR_PADDING) * num_records
         
-        # --- НОВОЕ: Рассчитываем полную ширину холста для фонов и линий ---
         canvas_width = LEFT_MARGIN + TIMELINE_WIDTH + PADDING
         
-        # --- НОВОЕ: Рисуем верхнюю границу всей диаграммы ---
         self.canvas.create_line(0, PADDING, canvas_width, PADDING, fill='lightgrey', dash=(2, 2))
 
         for i, layer_name in enumerate(ordered_layers):
             y_lane_start = PADDING + i * (LANE_HEIGHT + SUB_BAR_PADDING)
             
-            # --- НОВОЕ: Фон для нечетных дорожек и разделители ---
-            # Рисуем фон, если строка нечетная (для чередования)
             if i % 2 == 1:
                 self.canvas.create_rectangle(
                     0, y_lane_start, canvas_width, y_lane_start + LANE_HEIGHT,
                     fill='#f0f0f0', outline=''
                 )
-            # Рисуем нижнюю разделительную линию для каждой дорожки
             self.canvas.create_line(
                 0, y_lane_start + LANE_HEIGHT, canvas_width, y_lane_start + LANE_HEIGHT,
                 fill='lightgrey', dash=(2, 2)
             )
 
-            # Рисуем название слоя (поверх фона)
             self.canvas.create_text(
                 LEFT_MARGIN - 10, y_lane_start + LANE_HEIGHT / 2, text=layer_name, anchor=tk.E,
                 font=("Arial", int(self.font_sizes['layer_name'])), tags="layer_name_text"
             )
             
-            # Рисуем задачи (прямоугольники)
             for task in tasks_by_layer[layer_name]:
                 record_id, start, end = task['record_id'], task['start'], task['end']
                 color = self.get_record_color(record_id)
@@ -202,9 +232,17 @@ class GanttChartApp:
                 x0 = LEFT_MARGIN + (new_start - scale_min_time) / scale_total_duration * scale_width
                 x1 = LEFT_MARGIN + (new_end - scale_min_time) / scale_total_duration * scale_width
 
-                self.canvas.create_rectangle(x0, y0, x1, y0 + SUB_BAR_HEIGHT, fill=color, outline='black', width=1)
+                rect_id = self.canvas.create_rectangle(x0, y0, x1, y0 + SUB_BAR_HEIGHT, fill=color, outline='black', width=1, tags=("task_bar",))
                 
                 duration = end - start
+                self.task_info[rect_id] = {
+                    'layer': layer_name,
+                    'record': record_id,
+                    'duration': duration,
+                    'start': start,
+                    'end': end
+                }
+                
                 label_text = f"R:{record_id} ({duration:.2f}s)"
                 self.canvas.create_text(
                     (x0 + x1) / 2, y0 + SUB_BAR_HEIGHT / 2, text=label_text, fill='white',
@@ -222,7 +260,6 @@ class GanttChartApp:
         for i in range(num_ticks + 1):
             time_val = min_time + (total_duration * i / num_ticks)
             x_pos = LEFT_MARGIN + (time_val - min_time) / total_duration * scale_width
-            # Вертикальные линии сетки теперь не пересекают горизонтальные разделители
             self.canvas.create_line(x_pos, PADDING, x_pos, graph_height, fill='lightgrey', dash=(2, 2))
             self.canvas.create_text(
                 x_pos, PADDING - 20, text=f"{time_val:.2f}", anchor=tk.N,
