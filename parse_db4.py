@@ -17,8 +17,13 @@ class TensorViewer(ttk.Frame):
         self.pack(fill="both", expand=True)
 
         self.tensor = None
-        self.slice_indices_vars = []
         self.current_slice = None
+        
+        # --- Состояние выбора осей и ползунков ---
+        self.x_axis_dim_var = tk.StringVar()
+        self.y_axis_dim_var = tk.StringVar()
+        self.slider_dims = []
+        self.slider_vars_map = {} # {dim_index: tk.IntVar}
 
         # --- UI Элементы ---
         self.fig = Figure(figsize=(5, 4), dpi=100)
@@ -28,48 +33,109 @@ class TensorViewer(ttk.Frame):
         plot_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         
         self.canvas = FigureCanvasTkAgg(self.fig, master=plot_frame)
-        
         toolbar = NavigationToolbar2Tk(self.canvas, plot_frame)
         toolbar.update()
-        toolbar.pack(side=tk.BOTTOM, fill=tk.X)
-        
         self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-        self.sliders_frame = ttk.Frame(self)
-        self.sliders_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=5)
+        # --- Панель управления (оси и ползунки) ---
+        controls_area = ttk.Frame(self)
+        controls_area.pack(side=tk.BOTTOM, fill=tk.X, pady=5)
+
+        # --- НОВОЕ: Выбор осей для отображения ---
+        axis_selection_frame = ttk.LabelFrame(controls_area, text="Axis Selection")
+        axis_selection_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        ttk.Label(axis_selection_frame, text="Y-Axis:").pack(side=tk.LEFT, padx=(5,0))
+        self.y_axis_combo = ttk.Combobox(axis_selection_frame, textvariable=self.y_axis_dim_var, state="readonly", width=8)
+        self.y_axis_combo.pack(side=tk.LEFT, padx=5)
+        
+        ttk.Label(axis_selection_frame, text="X-Axis:").pack(side=tk.LEFT, padx=5)
+        self.x_axis_combo = ttk.Combobox(axis_selection_frame, textvariable=self.x_axis_dim_var, state="readonly", width=8)
+        self.x_axis_combo.pack(side=tk.LEFT, padx=5)
+
+        self.y_axis_combo.bind("<<ComboboxSelected>>", self._on_axis_selection_change)
+        self.x_axis_combo.bind("<<ComboboxSelected>>", self._on_axis_selection_change)
+
+        # Фрейм для ползунков
+        self.sliders_frame = ttk.Frame(controls_area)
+        self.sliders_frame.pack(fill=tk.X, expand=True)
 
         self.canvas.mpl_connect('scroll_event', self._on_zoom)
         self.canvas.mpl_connect('draw_event', self._on_draw)
         self.is_drawing = False
 
     def set_tensor(self, tensor_data):
+        """Главный метод для установки нового тензора и обновления вида."""
         self.tensor = tensor_data
+        self._setup_axis_selectors()
+        self._setup_sliders()
+        self._update_view(is_new_tensor=True)
+
+    def _setup_axis_selectors(self):
+        """Настраивает выпадающие списки для выбора осей."""
+        if self.tensor is None or self.tensor.ndim < 2:
+            self.x_axis_combo.config(values=[], state="disabled")
+            self.y_axis_combo.config(values=[], state="disabled")
+            return
+
+        dim_options = [f"Dim {i}" for i in range(self.tensor.ndim)]
+        self.x_axis_combo.config(values=dim_options, state="readonly")
+        self.y_axis_combo.config(values=dim_options, state="readonly")
+
+        # Устанавливаем значения по умолчанию (последние два измерения)
+        self.y_axis_dim_var.set(f"Dim {self.tensor.ndim - 2}")
+        self.x_axis_dim_var.set(f"Dim {self.tensor.ndim - 1}")
+
+    def _on_axis_selection_change(self, event=None):
+        """Обрабатывает смену осей, перестраивает ползунки и обновляет вид."""
+        x_dim = int(self.x_axis_dim_var.get().split(" ")[1])
+        y_dim = int(self.y_axis_dim_var.get().split(" ")[1])
+
+        # Защита от выбора одинаковых осей
+        if x_dim == y_dim:
+            messagebox.showerror("Invalid Selection", "X and Y axes cannot be the same dimension.")
+            # Откатываем выбор (немного костыльно, но работает)
+            self._setup_axis_selectors() 
+            return
+
         self._setup_sliders()
         self._update_view(is_new_tensor=True)
 
     def _setup_sliders(self):
+        """Создает ползунки для измерений, НЕ выбранных для осей X и Y."""
         for widget in self.sliders_frame.winfo_children():
             widget.destroy()
-        self.slice_indices_vars = []
+        
+        self.slider_dims = []
+        self.slider_vars_map = {}
+
         if self.tensor is None or self.tensor.ndim <= 2: return
-        num_sliceable_dims = self.tensor.ndim - 2
-        for i in range(num_sliceable_dims):
-            dim_shape = self.tensor.shape[i]
+
+        x_dim = int(self.x_axis_dim_var.get().split(" ")[1])
+        y_dim = int(self.y_axis_dim_var.get().split(" ")[1])
+
+        self.slider_dims = [i for i in range(self.tensor.ndim) if i not in (x_dim, y_dim)]
+
+        for dim_index in self.slider_dims:
+            dim_shape = self.tensor.shape[dim_index]
             var = tk.IntVar(value=0)
-            self.slice_indices_vars.append(var)
+            self.slider_vars_map[dim_index] = var
+
             frame = ttk.Frame(self.sliders_frame)
             frame.pack(fill=tk.X, padx=5, pady=2)
-            ttk.Label(frame, text=f"Dim {i}:").pack(side=tk.LEFT)
+            
+            ttk.Label(frame, text=f"Dim {dim_index}:").pack(side=tk.LEFT)
             scale = ttk.Scale(frame, from_=0, to=dim_shape - 1, orient=tk.HORIZONTAL, variable=var, command=self._on_slider_change)
             scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
             ttk.Label(frame, textvariable=var, width=4).pack(side=tk.LEFT)
+
             if dim_shape <= 1:
                 scale.config(state="disabled")
 
     def _on_slider_change(self, event=None):
-        for var in self.slice_indices_vars:
+        for var in self.slider_vars_map.values():
             var.set(round(var.get()))
-        self._update_view(is_new_tensor=True)
+        self._update_view(is_new_tensor=False) # Не сбрасываем зум при движении ползунка
 
     def _on_zoom(self, event):
         if event.xdata is None or event.ydata is None: return
@@ -88,19 +154,10 @@ class TensorViewer(ttk.Frame):
         if self.is_drawing: return
         self._update_view(is_new_tensor=False)
 
-    # --- ИЗМЕНЕНИЕ: Заменяем самописный пулинг на вызов из библиотеки scikit-image ---
     def _adaptive_pool(self, data, pool_size):
-        """
-        Выполняет 2D Max Pooling с помощью функции block_reduce из scikit-image.
-        """
-        # block_reduce ожидает кортеж для размера блока
         block_shape = (pool_size, pool_size)
-        
-        # Защита от ошибки, если данные меньше, чем окно пулинга
         if data.shape[0] < pool_size or data.shape[1] < pool_size:
             return data
-
-        # Вызываем функцию, передавая ей наш массив, размер блока и функцию np.max
         return block_reduce(data, block_size=block_shape, func=np.max)
 
     def _update_view(self, is_new_tensor=False):
@@ -112,19 +169,34 @@ class TensorViewer(ttk.Frame):
 
         self.ax.clear()
 
-        if self.tensor is None:
+        if self.tensor is None or self.tensor.ndim < 2:
             self.ax.text(0.5, 0.5, "No Tensor Data", ha="center", va="center", transform=self.ax.transAxes)
             self.ax.set_xticks([]); self.ax.set_yticks([])
             self.canvas.draw()
             self.is_drawing = False
             return
 
-        if len(self.slice_indices_vars) != self.tensor.ndim - 2:
-            self._setup_sliders()
+        # --- НОВАЯ ЛОГИКА ПОСТРОЕНИЯ СРЕЗА ---
+        x_dim = int(self.x_axis_dim_var.get().split(" ")[1])
+        y_dim = int(self.y_axis_dim_var.get().split(" ")[1])
 
-        slicer = tuple(var.get() for var in self.slice_indices_vars)
-        self.current_slice = self.tensor[slicer]
+        # Создаем "шаблон" среза, где все измерения берутся полностью
+        slicer = [slice(None)] * self.tensor.ndim
         
+        # Заменяем значения для измерений, управляемых ползунками
+        title_slicer = []
+        for dim_index, var in self.slider_vars_map.items():
+            val = var.get()
+            slicer[dim_index] = val
+            title_slicer.append(f"D{dim_index}={val}")
+        
+        self.current_slice = self.tensor[tuple(slicer)]
+        
+        # Matplotlib покажет Y по первой оси, X по второй. Нам нужно транспонировать, если выбор не совпадает.
+        if y_dim > x_dim:
+             self.current_slice = self.current_slice.T
+
+        # --- Логика адаптивного пулинга (без изменений) ---
         view_xlim = self.ax.get_xlim() if not is_new_tensor else (-0.5, self.current_slice.shape[1] - 0.5)
         view_width_data = view_xlim[1] - view_xlim[0]
         ax_width_pixels = self.ax.get_window_extent().width
@@ -136,11 +208,11 @@ class TensorViewer(ttk.Frame):
         
         if pool_size > 1:
             display_data = self._adaptive_pool(self.current_slice, pool_size)
-            title = f"Slice at {slicer} (Pooled {pool_size}x{pool_size})"
+            pool_title = f" (Pooled {pool_size}x{pool_size})"
             extent = (-0.5, self.current_slice.shape[1] - 0.5, self.current_slice.shape[0] - 0.5, -0.5)
         else:
             display_data = self.current_slice
-            title = f"Slice at {slicer} (Original)"
+            pool_title = " (Original)"
             extent = None
 
         im = self.ax.imshow(display_data, cmap='viridis', interpolation='nearest', extent=extent)
@@ -150,7 +222,9 @@ class TensorViewer(ttk.Frame):
         else:
             self.colorbar.update_normal(im)
 
-        self.ax.set_title(title)
+        self.ax.set_title(f"Slice at {', '.join(title_slicer)}{pool_title}")
+        self.ax.set_xlabel(f"Dimension {x_dim}")
+        self.ax.set_ylabel(f"Dimension {y_dim}")
         
         if is_new_tensor:
             self._reset_view()
@@ -167,6 +241,7 @@ class TensorViewer(ttk.Frame):
             self.ax.set_xlim(-0.5, w - 0.5)
             self.ax.set_ylim(h - 0.5, -0.5)
             self.canvas.draw_idle()
+
 class TensorTab(ttk.Frame):
     def __init__(self, parent):
         super().__init__(parent)
