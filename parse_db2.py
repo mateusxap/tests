@@ -21,6 +21,7 @@ class GanttChartApp:
         }
         self.font_sizes = self.DEFAULT_FONT_SIZES.copy()
         
+        # Словарь для хранения информации о задачах по уникальному тегу
         self.task_info = {}
 
         # --- Создание виджетов ---
@@ -46,7 +47,7 @@ class GanttChartApp:
         info_label = ttk.Label(self.main_frame, textvariable=self.info_var, anchor='w', font=("Arial", 10))
         info_label.pack(fill=tk.X, pady=(5, 10))
 
-        # --- Холст (без скроллбаров) ---
+        # --- Холст ---
         self.canvas = tk.Canvas(self.main_frame, bg='white')
         self.canvas.pack(fill=tk.BOTH, expand=True)
 
@@ -61,35 +62,34 @@ class GanttChartApp:
         self.update_chart()
 
     def _handle_right_click(self, event):
-        """Определяет, был ли клик по задаче или по фону, и действует соответственно."""
+        """Определяет, был ли клик по группе (прямоугольник+текст) и выводит информацию."""
         clicked_ids = self.canvas.find_withtag("current")
-        found_task = False
+        found_task_tag = None
+        
         if clicked_ids:
-            item_id = clicked_ids[0]
-            if "task_bar" in self.canvas.gettags(item_id):
-                info = self.task_info.get(item_id)
-                if info:
-                    info_text = (f"Layer: {info['layer']} | "
-                                 f"RecordID: {info['record']} | "
-                                 f"Duration: {info['duration']:.4f}s "
-                                 f"(Original Time: {info['start']:.3f}s - {info['end']:.3f}s)")
-                    self.info_var.set(info_text)
-                    found_task = True
-        if not found_task:
+            # Ищем среди тегов кликнутого объекта уникальный тег группы
+            tags = self.canvas.gettags(clicked_ids[0])
+            for tag in tags:
+                if tag.startswith("task_group_"):
+                    found_task_tag = tag
+                    break
+        
+        if found_task_tag:
+            info = self.task_info.get(found_task_tag)
+            if info:
+                info_text = (f"Layer: {info['layer']} | "
+                             f"RecordID: {info['record']} | "
+                             f"Duration: {info['duration']:.4f}s "
+                             f"(Original Time: {info['start']:.3f}s - {info['end']:.3f}s)")
+                self.info_var.set(info_text)
+        else:
             self._clear_info_label()
 
     def _clear_info_label(self, event=None):
-        """Очищает информационную метку и выводит подсказку."""
         self.info_var.set("Right-click on a bar to see details. Left-click and drag to pan.")
 
-    # --- ИЗМЕНЕНИЕ: Возвращаем старую, интуитивную логику панорамирования ---
-    def move_start(self, event):
-        """Запоминает начальную позицию для перемещения с помощью scan_mark."""
-        self.canvas.scan_mark(event.x, event.y)
-
-    def move_move(self, event):
-        """Перемещает холст вслед за курсором."""
-        self.canvas.scan_dragto(event.x, event.y, gain=1)
+    def move_start(self, event): self.canvas.scan_mark(event.x, event.y)
+    def move_move(self, event): self.canvas.scan_dragto(event.x, event.y, gain=1)
 
     def _on_mousewheel(self, event):
         factor = 0
@@ -111,7 +111,6 @@ class GanttChartApp:
                 font_style = "bold" if key in ['bar_label', 'legend_title'] else ""
                 self.canvas.itemconfigure(item_id, font=(font_name, int(size), font_style))
 
-    # --- Методы для работы с данными и отрисовки (без изменений) ---
     def get_record_color(self, record_id):
         if record_id not in self.record_colors:
             self.record_colors[record_id] = self.color_palette[len(self.record_colors) % len(self.color_palette)]
@@ -200,6 +199,8 @@ class GanttChartApp:
         
         self.canvas.create_line(0, PADDING, canvas_width, PADDING, fill='lightgrey', dash=(2, 2))
 
+        task_counter = 0 # --- НОВОЕ: Счетчик для уникальных тегов ---
+
         for i, layer_name in enumerate(ordered_layers):
             y_lane_start = PADDING + i * (LANE_HEIGHT + SUB_BAR_PADDING)
             
@@ -219,6 +220,9 @@ class GanttChartApp:
             )
             
             for task in tasks_by_layer[layer_name]:
+                task_counter += 1
+                group_tag = f"task_group_{task_counter}" # Создаем уникальный тег для группы
+
                 record_id, start, end = task['record_id'], task['start'], task['end']
                 color = self.get_record_color(record_id)
                 v_index = record_to_v_index.get(record_id, 0)
@@ -232,10 +236,12 @@ class GanttChartApp:
                 x0 = LEFT_MARGIN + (new_start - scale_min_time) / scale_total_duration * scale_width
                 x1 = LEFT_MARGIN + (new_end - scale_min_time) / scale_total_duration * scale_width
 
-                rect_id = self.canvas.create_rectangle(x0, y0, x1, y0 + SUB_BAR_HEIGHT, fill=color, outline='black', width=1, tags=("task_bar",))
+                # Добавляем уникальный тег группы к прямоугольнику
+                self.canvas.create_rectangle(x0, y0, x1, y0 + SUB_BAR_HEIGHT, fill=color, outline='black', width=1, tags=("task_bar", group_tag))
                 
                 duration = end - start
-                self.task_info[rect_id] = {
+                # Сохраняем информацию по уникальному тегу группы
+                self.task_info[group_tag] = {
                     'layer': layer_name,
                     'record': record_id,
                     'duration': duration,
@@ -244,9 +250,10 @@ class GanttChartApp:
                 }
                 
                 label_text = f"R:{record_id} ({duration:.2f}s)"
+                # Добавляем уникальный тег группы к тексту
                 self.canvas.create_text(
                     (x0 + x1) / 2, y0 + SUB_BAR_HEIGHT / 2, text=label_text, fill='white',
-                    font=("Arial", int(self.font_sizes['bar_label']), "bold"), tags="bar_label_text"
+                    font=("Arial", int(self.font_sizes['bar_label']), "bold"), tags=("bar_label_text", group_tag)
                 )
 
     def _draw_time_axis(self, min_time, total_duration, layers, num_records):
