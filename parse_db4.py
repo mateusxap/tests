@@ -20,14 +20,17 @@ class TensorViewer(ttk.Frame):
         self.tensor = None
         self.current_slice = None
         self.slice_indices_vars = []
+        
+        # --- Переменные для плавного панорамирования ---
+        self._pan_start_pixel = None
+        self._pan_start_xlim = None
+        self._pan_start_ylim = None
 
         # --- UI Элементы ---
         self.fig = Figure(figsize=(5, 4), dpi=100)
         self.ax = self.fig.add_subplot(111)
         
         self.canvas = FigureCanvasTkAgg(self.fig, master=self)
-        toolbar = NavigationToolbar2Tk(self.canvas, self)
-        toolbar.update()
         self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
         controls_area = ttk.Frame(self)
@@ -39,7 +42,11 @@ class TensorViewer(ttk.Frame):
         self.sliders_frame = ttk.Frame(controls_area)
         self.sliders_frame.pack(fill=tk.X, expand=True)
 
+        # --- Привязка событий для панорамирования и зума ---
         self.canvas.mpl_connect('scroll_event', self._on_zoom)
+        self.canvas.mpl_connect('button_press_event', self._on_pan_start)
+        self.canvas.mpl_connect('button_release_event', self._on_pan_end)
+        self.canvas.mpl_connect('motion_notify_event', self._on_pan_move)
 
     def set_tensor(self, tensor_data):
         self.tensor = tensor_data
@@ -69,6 +76,51 @@ class TensorViewer(ttk.Frame):
     def _on_slider_change(self, event=None):
         self._update_view()
 
+    # --- НОВЫЕ, ИСПРАВЛЕННЫЕ МЕТОДЫ ДЛЯ ПАНОРАМИРОВАНИЯ ---
+    def _on_pan_start(self, event):
+        if event.button == 1 and event.inaxes == self.ax:
+            self._pan_start_pixel = (event.x, event.y)
+            self._pan_start_xlim = self.ax.get_xlim()
+            self._pan_start_ylim = self.ax.get_ylim()
+
+    def _on_pan_end(self, event):
+        if event.button == 1:
+            self._pan_start_pixel = None
+            self._pan_start_xlim = None
+            self._pan_start_ylim = None
+
+    def _on_pan_move(self, event):
+        if self._pan_start_pixel is None or event.inaxes != self.ax:
+            return
+
+        # 1. Считаем смещение в пикселях
+        dx_pixel = event.x - self._pan_start_pixel[0]
+        dy_pixel = event.y - self._pan_start_pixel[1]
+
+        # 2. Конвертируем пиксели в единицы данных
+        ax_bbox = self.ax.get_window_extent()
+        data_width = self._pan_start_xlim[1] - self._pan_start_xlim[0]
+        data_height = self._pan_start_ylim[1] - self._pan_start_ylim[0]
+        
+        # Проверяем, что ширина и высота не нулевые, чтобы избежать деления на ноль
+        if ax_bbox.width == 0 or ax_bbox.height == 0:
+            return
+
+        data_per_pixel_x = data_width / ax_bbox.width
+        data_per_pixel_y = data_height / ax_bbox.height
+
+        dx_data = dx_pixel * data_per_pixel_x
+        dy_data = dy_pixel * data_per_pixel_y
+
+        # 3. Применяем смещение к ИСХОДНЫМ пределам
+        new_xlim = (self._pan_start_xlim[0] - dx_data, self._pan_start_xlim[1] - dx_data)
+        new_ylim = (self._pan_start_ylim[0] - dy_data, self._pan_start_ylim[1] - dy_data)
+        
+        self.ax.set_xlim(new_xlim)
+        self.ax.set_ylim(new_ylim)
+        
+        self.canvas.draw_idle()
+
     def _on_zoom(self, event):
         if event.xdata is None or event.ydata is None: return
         factor = 1.2 if event.button == 'up' else 1/1.2
@@ -83,72 +135,47 @@ class TensorViewer(ttk.Frame):
         self.canvas.draw_idle()
 
     def _reset_view(self):
-        """Сбрасывает вид, вызывая полное перестроение центрирования."""
         self._update_view()
 
     def _center_and_set_view(self):
-        """КЛЮЧЕВОЙ МЕТОД: Вычисляет и устанавливает пределы для идеального центрирования."""
         if self.current_slice is None: return
-        
         h, w = self.current_slice.shape
-        
-        # Получаем размеры области для рисования в пикселях
         ax_bbox = self.ax.get_window_extent()
         ax_width_pixels, ax_height_pixels = ax_bbox.width, ax_bbox.height
-        
         if ax_width_pixels == 0 or ax_height_pixels == 0: return
-
-        # Считаем соотношения сторон
-        aspect_data = w / h
+        aspect_data = w / h if h > 0 else 1
         aspect_ax = ax_width_pixels / ax_height_pixels
-
-        # Устанавливаем aspect='equal', чтобы пиксели были квадратными
         self.ax.set_aspect('equal')
-
         if aspect_data > aspect_ax:
-            # Данные "шире" области -> ширина определяет масштаб
-            # xlim будет "плотным", ylim нужно расширить
             self.ax.set_xlim(-0.5, w - 0.5)
             required_height = w / aspect_ax
             margin_y = (required_height - h) / 2
             self.ax.set_ylim(h - 0.5 + margin_y, -0.5 - margin_y)
         else:
-            # Данные "выше" области -> высота определяет масштаб
-            # ylim будет "плотным", xlim нужно расширить
             self.ax.set_ylim(h - 0.5, -0.5)
             required_width = h * aspect_ax
             margin_x = (required_width - w) / 2
             self.ax.set_xlim(-0.5 - margin_x, w - 0.5 + margin_x)
 
     def _update_view(self):
-        """Основная функция отрисовки: делает срез, рисует и вызывает центрирование."""
         self.ax.clear()
-
         if self.tensor is None:
             self.ax.text(0.5, 0.5, "No Tensor Data", ha="center", va="center", transform=self.ax.transAxes)
             self.ax.set_xticks([]); self.ax.set_yticks([])
             self.canvas.draw()
             return
-
         slicer = tuple(var.get() for var in self.slice_indices_vars)
         self.current_slice = self.tensor[slicer]
-
         vmin = 0
         vmax = np.max(self.current_slice)
         if vmax == 0: vmax = 1.0
-        
         im = self.ax.imshow(self.current_slice, cmap='viridis', interpolation='nearest', vmin=vmin, vmax=vmax)
-        
         if not hasattr(self, 'colorbar') or self.colorbar.ax is None or self.colorbar.ax.figure != self.fig:
              self.colorbar = self.fig.colorbar(im, ax=self.ax)
         else:
             self.colorbar.update_normal(im)
-
         self.ax.set_title(f"Slice at {slicer}")
-        
-        # Вызываем новый метод для установки правильных пределов
         self._center_and_set_view()
-        
         self.canvas.draw()
 # =====================================================================================
 #  Вкладка для анализа тензоров (использует новый TensorViewer)
