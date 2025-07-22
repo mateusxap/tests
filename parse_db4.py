@@ -19,20 +19,25 @@ class TensorViewer(ttk.Frame):
 
         self.tensor = None
         self.current_slice = None
-        self.slice_indices_vars = []
         
+        # --- Переменные и виджеты для панорамирования и ползунков ---
         self._pan_start_pixel = None
         self._pan_start_xlim = None
         self._pan_start_ylim = None
+        self.slice_sliders = [] # Будет хранить словари {'var':..., 'scale':..., 'label':...}
 
+        # --- UI Элементы ---
         self.fig = Figure(figsize=(5, 4), dpi=100)
         self.ax = self.fig.add_subplot(111)
         
-        self.canvas = FigureCanvasTkAgg(self.fig, master=self)
-        self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-
+        # --- ИЗМЕНЕНИЕ КОМПОНОВКИ ---
+        # Сначала создаем нижнюю панель управления
         controls_area = ttk.Frame(self)
         controls_area.pack(side=tk.BOTTOM, fill=tk.X, pady=5)
+
+        # Теперь холст занимает все ОСТАВШЕЕСЯ пространство
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self)
+        self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
         reset_button = ttk.Button(controls_area, text="Reset View", command=self._reset_view)
         reset_button.pack(pady=5)
@@ -40,10 +45,35 @@ class TensorViewer(ttk.Frame):
         self.sliders_frame = ttk.Frame(controls_area)
         self.sliders_frame.pack(fill=tk.X, expand=True)
 
+        # --- ИЗМЕНЕНИЕ: Создаем ползунки сразу, но невидимыми ---
+        self._create_sliders_placeholders()
+
+        # --- Привязка событий ---
         self.canvas.mpl_connect('scroll_event', self._on_zoom)
         self.canvas.mpl_connect('button_press_event', self._on_pan_start)
         self.canvas.mpl_connect('button_release_event', self._on_pan_end)
         self.canvas.mpl_connect('motion_notify_event', self._on_pan_move)
+
+    def _create_sliders_placeholders(self):
+        """Создает максимальное количество ползунков в __init__ и скрывает их."""
+        # Предполагаем максимальную размерность 5D, значит нужно 3 ползунка
+        max_sliders = 3 
+        for i in range(max_sliders):
+            frame = ttk.Frame(self.sliders_frame)
+            # frame.pack() будет вызван позже в _setup_sliders
+            
+            var = tk.IntVar(value=0)
+            label = ttk.Label(frame, text=f"Dim {i}:")
+            scale = ttk.Scale(frame, from_=0, to=0, orient=tk.HORIZONTAL, variable=var, command=self._on_slider_change)
+            value_label = ttk.Label(frame, textvariable=var, width=4)
+            
+            label.pack(side=tk.LEFT)
+            scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+            value_label.pack(side=tk.LEFT)
+            
+            self.slice_sliders.append({
+                'frame': frame, 'var': var, 'scale': scale
+            })
 
     def set_tensor(self, tensor_data):
         self.tensor = tensor_data
@@ -51,24 +81,28 @@ class TensorViewer(ttk.Frame):
         self._update_view()
 
     def _setup_sliders(self):
-        for widget in self.sliders_frame.winfo_children():
-            widget.destroy()
-        self.slice_indices_vars = []
+        """Настраивает существующие ползунки: показывает нужные, скрывает лишние."""
         if self.tensor is None or self.tensor.ndim <= 2:
-            return
-        num_sliceable_dims = self.tensor.ndim - 2
-        for i in range(num_sliceable_dims):
-            self.slice_indices_vars.append(tk.IntVar(value=0))
-        for i in range(num_sliceable_dims):
-            dim_shape = self.tensor.shape[i]
-            if dim_shape > 1:
-                frame = ttk.Frame(self.sliders_frame)
-                frame.pack(fill=tk.X, padx=5, pady=2)
-                ttk.Label(frame, text=f"Dim {i}:").pack(side=tk.LEFT)
-                var = self.slice_indices_vars[i]
-                scale = ttk.Scale(frame, from_=0, to=dim_shape - 1, orient=tk.HORIZONTAL, variable=var, command=self._on_slider_change)
-                scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-                ttk.Label(frame, textvariable=var, width=4).pack(side=tk.LEFT)
+            num_sliceable_dims = 0
+        else:
+            num_sliceable_dims = self.tensor.ndim - 2
+
+        for i, slider_pack in enumerate(self.slice_sliders):
+            frame = slider_pack['frame']
+            if i < num_sliceable_dims:
+                dim_shape = self.tensor.shape[i]
+                if dim_shape > 1:
+                    # Показываем и настраиваем ползунок
+                    slider_pack['var'].set(0)
+                    slider_pack['scale'].config(from_=0, to=dim_shape - 1, state='normal')
+                    frame.pack(fill=tk.X, padx=5, pady=2) # Показываем фрейм
+                else:
+                    # Измерение есть, но его длина 1, скрываем ползунок
+                    slider_pack['var'].set(0)
+                    frame.pack_forget() # Скрываем фрейм
+            else:
+                # Этот ползунок не нужен для текущего тензора
+                frame.pack_forget() # Скрываем фрейм
 
     def _on_slider_change(self, event=None):
         self._update_view()
@@ -147,17 +181,16 @@ class TensorViewer(ttk.Frame):
     def _update_view(self):
         self.ax.clear()
         if self.tensor is None:
-            # --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
-            # Принудительно сбрасываем состояние осей к нейтральному
-            self.ax.set_aspect('auto') # Сначала сбрасываем aspect
-            self.ax.set_xlim(0, 1)     # Устанавливаем нейтральные пределы
+            self.ax.set_aspect('auto')
+            self.ax.set_xlim(0, 1)
             self.ax.set_ylim(0, 1)
             self.ax.text(0.5, 0.5, "No Tensor Data", ha="center", va="center", transform=self.ax.transAxes)
             self.ax.set_xticks([]); self.ax.set_yticks([])
             self.canvas.draw()
             return
         
-        slicer = tuple(var.get() for var in self.slice_indices_vars)
+        # Собираем индексы из всех существующих переменных
+        slicer = tuple(sp['var'].get() for sp in self.slice_sliders[:self.tensor.ndim - 2])
         self.current_slice = self.tensor[slicer]
         
         vmin = 0
