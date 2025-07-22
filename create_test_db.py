@@ -8,7 +8,7 @@ DB_NAME = "debug.db"
 
 if os.path.exists(DB_NAME):
     os.remove(DB_NAME)
-    print(f"Old database '{DB_NAME}' removed.")
+    print(f"Старая база данных '{DB_NAME}' удалена.")
 
 conn = sqlite3.connect(DB_NAME)
 cursor = conn.cursor()
@@ -36,14 +36,15 @@ CREATE TABLE IF NOT EXISTS TensorMap (
 
 # --- Генерация тестовых данных ---
 
-# ИЗМЕНЕНИЕ 1: Заранее определенные, фиксированные размерности для каждого слоя
-# Чтобы продемонстрировать все размерности от 1 до 5
+# ИЗМЕНЕНИЕ 1: Добавляем разные типы 2D тензоров с запоминающимися именами
 layer_shapes = {
-    'Input Layer': (10,),                                  # 1D
-    'Embedding Layer': (10, 16),                           # 2D
-    'Attention Layer': (4, 10, 16),                        # 3D
-    'Conv Layer': (1, 3, 32, 32),                          # 4D
-    'Video Conv Layer': (1, 3, 16, 32, 32),                # 5D
+    'Слой с 1D тензором': (10,),                                      # 1D
+    'Слой с широким тензором (горизонтальный)': (8, 32),               # 2D (ширина > высота)
+    'Слой с высоким тензором (вертикальный)': (32, 8),                # 2D (высота > ширина)
+    'Слой с квадратным тензором': (16, 16),                           # 2D (высота == ширина)
+    'Слой с 3D тензором': (4, 10, 16),                                # 3D
+    'Слой с 4D тензором (картинка)': (1, 3, 32, 32),                   # 4D
+    'Слой с 5D тензором (видео)': (1, 3, 16, 32, 32),                  # 5D
 }
 layers = list(layer_shapes.keys())
 
@@ -64,7 +65,7 @@ def generate_tensor_data(shape, record_id):
 records_to_generate = 3
 
 for record_id in range(1, records_to_generate + 1):
-    print(f"Generating data for Record #{record_id}...")
+    print(f"Генерация данных для Записи #{record_id}...")
     current_time = 0.0
     for i, layer_name in enumerate(layers):
         # --- Генерация данных для Nodes ---
@@ -82,7 +83,7 @@ for record_id in range(1, records_to_generate + 1):
         # --- Генерация данных для Tensors ---
         base_shape = layer_shapes[layer_name]
         
-        # ИЗМЕНЕНИЕ 2: Для RecordID=3 делаем размерность немного другой
+        # Для RecordID=3 делаем размерность немного другой
         if record_id == 3:
             # Превращаем кортеж в список, изменяем, и обратно в кортеж
             shape_list = list(base_shape)
@@ -99,10 +100,11 @@ for record_id in range(1, records_to_generate + 1):
         element_size = 4 # float32
         data_size_bytes = np.prod(current_shape) * element_size
         
-        # ИЗМЕНЕНИЕ 3: Генерируем разные данные для разных RecordID
+        # Генерируем разные данные для разных RecordID
         blob_data = generate_tensor_data(current_shape, record_id)
 
-        tensor_name = f"{layer_name.replace(' ', '_')}_output"
+        # ИЗМЕНЕНИЕ 2: Имя тензора теперь будет очень описательным благодаря имени слоя
+        tensor_name = f"{layer_name.replace(' ', '_').replace('(', '').replace(')', '')}_output"
         
         cursor.execute(
             """INSERT INTO Tensors 
@@ -121,7 +123,8 @@ for record_id in range(1, records_to_generate + 1):
 conn.commit()
 conn.close()
 
-print(f"\nDatabase '{DB_NAME}' has been successfully created with structured tensor data.")
-print("Tensors for Record #1 and #2 are compatible.")
-print("Tensors for Record #3 have different shapes.")
-print("You can now run the main application file.")
+print(f"\nБаза данных '{DB_NAME}' успешно создана со структурированными данными.")
+print("Теперь генерируются горизонтальные, вертикальные и квадратные 2D тензоры.")
+print("Тензоры для Записи #1 и #2 совместимы.")
+print("Тензоры для Записи #3 имеют немного другие размерности.")
+print("Можно запускать основной файл приложения.")

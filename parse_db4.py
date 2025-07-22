@@ -20,17 +20,13 @@ class TensorViewer(ttk.Frame):
         self.tensor = None
         self.current_slice = None
         self.slice_indices_vars = []
-        self.is_drawing = False
 
         # --- UI Элементы ---
         self.fig = Figure(figsize=(5, 4), dpi=100)
         self.ax = self.fig.add_subplot(111)
         
-        plot_frame = ttk.Frame(self)
-        plot_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        
-        self.canvas = FigureCanvasTkAgg(self.fig, master=plot_frame)
-        toolbar = NavigationToolbar2Tk(self.canvas, plot_frame)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self)
+        toolbar = NavigationToolbar2Tk(self.canvas, self)
         toolbar.update()
         self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
@@ -44,29 +40,21 @@ class TensorViewer(ttk.Frame):
         self.sliders_frame.pack(fill=tk.X, expand=True)
 
         self.canvas.mpl_connect('scroll_event', self._on_zoom)
-        self.canvas.mpl_connect('draw_event', self._on_draw)
 
     def set_tensor(self, tensor_data):
-        """Главный метод для установки нового тензора и обновления вида."""
         self.tensor = tensor_data
         self._setup_sliders()
-        self._update_view(is_new_tensor=True)
+        self._update_view()
 
     def _setup_sliders(self):
-        """Создает ползунки для измерений, размер которых > 1."""
         for widget in self.sliders_frame.winfo_children():
             widget.destroy()
-        
         self.slice_indices_vars = []
-
         if self.tensor is None or self.tensor.ndim <= 2:
             return
-
         num_sliceable_dims = self.tensor.ndim - 2
-        
         for i in range(num_sliceable_dims):
             self.slice_indices_vars.append(tk.IntVar(value=0))
-
         for i in range(num_sliceable_dims):
             dim_shape = self.tensor.shape[i]
             if dim_shape > 1:
@@ -79,11 +67,11 @@ class TensorViewer(ttk.Frame):
                 ttk.Label(frame, textvariable=var, width=4).pack(side=tk.LEFT)
 
     def _on_slider_change(self, event=None):
-        self._update_view(is_new_tensor=False)
+        self._update_view()
 
     def _on_zoom(self, event):
         if event.xdata is None or event.ydata is None: return
-        factor = 1.5 if event.button == 'up' else 1/1.5
+        factor = 1.2 if event.button == 'up' else 1/1.2
         cur_xlim, cur_ylim = self.ax.get_xlim(), self.ax.get_ylim()
         xdata, ydata = event.xdata, event.ydata
         new_width = (cur_xlim[1] - cur_xlim[0]) / factor
@@ -92,93 +80,76 @@ class TensorViewer(ttk.Frame):
         rel_y = (cur_ylim[1] - ydata) / (cur_ylim[1] - cur_ylim[0])
         self.ax.set_xlim([xdata - new_width * (1 - rel_x), xdata + new_width * rel_x])
         self.ax.set_ylim([ydata - new_height * (1 - rel_y), ydata + new_height * rel_y])
-        self._update_view(is_new_tensor=False)
+        self.canvas.draw_idle()
 
     def _reset_view(self):
-        if self.current_slice is not None:
-            self._update_view(is_new_tensor=True)
+        """Сбрасывает вид, вызывая полное перестроение центрирования."""
+        self._update_view()
 
-    def _on_draw(self, event):
-        if self.is_drawing: return
-        self._update_view(is_new_tensor=False)
+    def _center_and_set_view(self):
+        """КЛЮЧЕВОЙ МЕТОД: Вычисляет и устанавливает пределы для идеального центрирования."""
+        if self.current_slice is None: return
+        
+        h, w = self.current_slice.shape
+        
+        # Получаем размеры области для рисования в пикселях
+        ax_bbox = self.ax.get_window_extent()
+        ax_width_pixels, ax_height_pixels = ax_bbox.width, ax_bbox.height
+        
+        if ax_width_pixels == 0 or ax_height_pixels == 0: return
 
-    def _adaptive_pool(self, data, pool_size):
-        block_shape = (pool_size, pool_size)
-        if data.shape[0] < pool_size or data.shape[1] < pool_size:
-            return data
-        return block_reduce(data, block_size=block_shape, func=np.max)
+        # Считаем соотношения сторон
+        aspect_data = w / h
+        aspect_ax = ax_width_pixels / ax_height_pixels
 
-    def _update_view(self, is_new_tensor=False):
-        if self.is_drawing: return
-        self.is_drawing = True
+        # Устанавливаем aspect='equal', чтобы пиксели были квадратными
+        self.ax.set_aspect('equal')
 
-        if not is_new_tensor:
-            xlim, ylim = self.ax.get_xlim(), self.ax.get_ylim()
+        if aspect_data > aspect_ax:
+            # Данные "шире" области -> ширина определяет масштаб
+            # xlim будет "плотным", ylim нужно расширить
+            self.ax.set_xlim(-0.5, w - 0.5)
+            required_height = w / aspect_ax
+            margin_y = (required_height - h) / 2
+            self.ax.set_ylim(h - 0.5 + margin_y, -0.5 - margin_y)
+        else:
+            # Данные "выше" области -> высота определяет масштаб
+            # ylim будет "плотным", xlim нужно расширить
+            self.ax.set_ylim(h - 0.5, -0.5)
+            required_width = h * aspect_ax
+            margin_x = (required_width - w) / 2
+            self.ax.set_xlim(-0.5 - margin_x, w - 0.5 + margin_x)
 
+    def _update_view(self):
+        """Основная функция отрисовки: делает срез, рисует и вызывает центрирование."""
         self.ax.clear()
 
         if self.tensor is None:
             self.ax.text(0.5, 0.5, "No Tensor Data", ha="center", va="center", transform=self.ax.transAxes)
             self.ax.set_xticks([]); self.ax.set_yticks([])
             self.canvas.draw()
-            self.is_drawing = False
             return
 
-        # --- ОБЪЕДИНЕННАЯ ЛОГИКА ---
-        # 1. Делаем 2D-срез на основе ползунков
         slicer = tuple(var.get() for var in self.slice_indices_vars)
         self.current_slice = self.tensor[slicer]
 
-        # 2. Вычисляем необходимость пулинга на основе зума и размера этого среза
-        if is_new_tensor:
-            h, w = self.current_slice.shape
-            view_xlim = (-0.5, w - 0.5)
-        else:
-            view_xlim = xlim
-            
-        view_width_data = view_xlim[1] - view_xlim[0]
-        ax_width_pixels = self.ax.get_window_extent().width
+        vmin = 0
+        vmax = np.max(self.current_slice)
+        if vmax == 0: vmax = 1.0
         
-        if ax_width_pixels <= 1:
-            self.is_drawing = False
-            return
-
-        data_pixels_per_screen_pixel = view_width_data / ax_width_pixels
-        
-        pool_size = 1
-        if data_pixels_per_screen_pixel > 1.1:
-            pool_size = int(np.ceil(data_pixels_per_screen_pixel))
-        
-        if pool_size > 1:
-            display_data = self._adaptive_pool(self.current_slice, pool_size)
-            pool_title = f" (Pooled {pool_size}x{pool_size})"
-            extent = (-0.5, self.current_slice.shape[1] - 0.5, self.current_slice.shape[0] - 0.5, -0.5)
-        else:
-            display_data = self.current_slice
-            pool_title = " (Original Resolution)"
-            extent = None
-
-        # 3. Рисуем результат
-        im = self.ax.imshow(display_data, cmap='viridis', interpolation='nearest', extent=extent)
+        im = self.ax.imshow(self.current_slice, cmap='viridis', interpolation='nearest', vmin=vmin, vmax=vmax)
         
         if not hasattr(self, 'colorbar') or self.colorbar.ax is None or self.colorbar.ax.figure != self.fig:
              self.colorbar = self.fig.colorbar(im, ax=self.ax)
         else:
             self.colorbar.update_normal(im)
 
-        self.ax.set_title(f"Slice at {slicer}{pool_title}")
+        self.ax.set_title(f"Slice at {slicer}")
         
-        if is_new_tensor:
-            h, w = self.current_slice.shape
-            self.ax.set_xlim(-0.5, w - 0.5)
-            self.ax.set_ylim(h - 0.5, -0.5)
-        else:
-            self.ax.set_xlim(xlim)
-            self.ax.set_ylim(ylim)
-
+        # Вызываем новый метод для установки правильных пределов
+        self._center_and_set_view()
+        
         self.canvas.draw()
-        self.is_drawing = False
-
 # =====================================================================================
 #  Вкладка для анализа тензоров (использует новый TensorViewer)
 # =====================================================================================
