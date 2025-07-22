@@ -21,12 +21,10 @@ class TensorViewer(ttk.Frame):
         self.current_slice = None
         self.slice_indices_vars = []
         
-        # --- Переменные для плавного панорамирования ---
         self._pan_start_pixel = None
         self._pan_start_xlim = None
         self._pan_start_ylim = None
 
-        # --- UI Элементы ---
         self.fig = Figure(figsize=(5, 4), dpi=100)
         self.ax = self.fig.add_subplot(111)
         
@@ -42,7 +40,6 @@ class TensorViewer(ttk.Frame):
         self.sliders_frame = ttk.Frame(controls_area)
         self.sliders_frame.pack(fill=tk.X, expand=True)
 
-        # --- Привязка событий для панорамирования и зума ---
         self.canvas.mpl_connect('scroll_event', self._on_zoom)
         self.canvas.mpl_connect('button_press_event', self._on_pan_start)
         self.canvas.mpl_connect('button_release_event', self._on_pan_end)
@@ -76,7 +73,6 @@ class TensorViewer(ttk.Frame):
     def _on_slider_change(self, event=None):
         self._update_view()
 
-    # --- НОВЫЕ, ИСПРАВЛЕННЫЕ МЕТОДЫ ДЛЯ ПАНОРАМИРОВАНИЯ ---
     def _on_pan_start(self, event):
         if event.button == 1 and event.inaxes == self.ax:
             self._pan_start_pixel = (event.x, event.y)
@@ -92,33 +88,20 @@ class TensorViewer(ttk.Frame):
     def _on_pan_move(self, event):
         if self._pan_start_pixel is None or event.inaxes != self.ax:
             return
-
-        # 1. Считаем смещение в пикселях
         dx_pixel = event.x - self._pan_start_pixel[0]
         dy_pixel = event.y - self._pan_start_pixel[1]
-
-        # 2. Конвертируем пиксели в единицы данных
         ax_bbox = self.ax.get_window_extent()
         data_width = self._pan_start_xlim[1] - self._pan_start_xlim[0]
         data_height = self._pan_start_ylim[1] - self._pan_start_ylim[0]
-        
-        # Проверяем, что ширина и высота не нулевые, чтобы избежать деления на ноль
-        if ax_bbox.width == 0 or ax_bbox.height == 0:
-            return
-
+        if ax_bbox.width == 0 or ax_bbox.height == 0: return
         data_per_pixel_x = data_width / ax_bbox.width
         data_per_pixel_y = data_height / ax_bbox.height
-
         dx_data = dx_pixel * data_per_pixel_x
         dy_data = dy_pixel * data_per_pixel_y
-
-        # 3. Применяем смещение к ИСХОДНЫМ пределам
         new_xlim = (self._pan_start_xlim[0] - dx_data, self._pan_start_xlim[1] - dx_data)
         new_ylim = (self._pan_start_ylim[0] - dy_data, self._pan_start_ylim[1] - dy_data)
-        
         self.ax.set_xlim(new_xlim)
         self.ax.set_ylim(new_ylim)
-        
         self.canvas.draw_idle()
 
     def _on_zoom(self, event):
@@ -141,10 +124,12 @@ class TensorViewer(ttk.Frame):
         if self.current_slice is None: return
         h, w = self.current_slice.shape
         ax_bbox = self.ax.get_window_extent()
-        ax_width_pixels, ax_height_pixels = ax_bbox.width, ax_bbox.height
-        if ax_width_pixels == 0 or ax_height_pixels == 0: return
+        if not (ax_bbox.width > 0 and ax_bbox.height > 0):
+            self.canvas.get_tk_widget().after(10, self._center_and_set_view)
+            return
+        
         aspect_data = w / h if h > 0 else 1
-        aspect_ax = ax_width_pixels / ax_height_pixels
+        aspect_ax = ax_bbox.width / ax_bbox.height
         self.ax.set_aspect('equal')
         if aspect_data > aspect_ax:
             self.ax.set_xlim(-0.5, w - 0.5)
@@ -156,27 +141,39 @@ class TensorViewer(ttk.Frame):
             required_width = h * aspect_ax
             margin_x = (required_width - w) / 2
             self.ax.set_xlim(-0.5 - margin_x, w - 0.5 + margin_x)
+        
+        self.canvas.draw_idle()
 
     def _update_view(self):
         self.ax.clear()
         if self.tensor is None:
+            # --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
+            # Принудительно сбрасываем состояние осей к нейтральному
+            self.ax.set_aspect('auto') # Сначала сбрасываем aspect
+            self.ax.set_xlim(0, 1)     # Устанавливаем нейтральные пределы
+            self.ax.set_ylim(0, 1)
             self.ax.text(0.5, 0.5, "No Tensor Data", ha="center", va="center", transform=self.ax.transAxes)
             self.ax.set_xticks([]); self.ax.set_yticks([])
             self.canvas.draw()
             return
+        
         slicer = tuple(var.get() for var in self.slice_indices_vars)
         self.current_slice = self.tensor[slicer]
+        
         vmin = 0
         vmax = np.max(self.current_slice)
         if vmax == 0: vmax = 1.0
+        
         im = self.ax.imshow(self.current_slice, cmap='viridis', interpolation='nearest', vmin=vmin, vmax=vmax)
+        
         if not hasattr(self, 'colorbar') or self.colorbar.ax is None or self.colorbar.ax.figure != self.fig:
              self.colorbar = self.fig.colorbar(im, ax=self.ax)
         else:
             self.colorbar.update_normal(im)
+
         self.ax.set_title(f"Slice at {slicer}")
-        self._center_and_set_view()
-        self.canvas.draw()
+        
+        self.canvas.get_tk_widget().after(1, self._center_and_set_view)
 # =====================================================================================
 #  Вкладка для анализа тензоров (использует новый TensorViewer)
 # =====================================================================================
