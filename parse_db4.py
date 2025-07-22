@@ -79,7 +79,7 @@ class TensorViewer(ttk.Frame):
             frame = ttk.Frame(self.sliders_frame)
             var = tk.IntVar(value=0)
             label = ttk.Label(frame, text=f"Dim {i}:")
-            scale = ttk.Scale(frame, from_=0, to=0, orient=tk.HORIZONTAL, variable=var, command=self._on_slider_change)
+            scale = tk.Scale(frame, from_=0, to=0, orient=tk.HORIZONTAL, resolution=1, variable=var, command=self._on_slider_change)
             value_label = ttk.Label(frame, textvariable=var, width=4)
             label.pack(side=tk.LEFT)
             scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
