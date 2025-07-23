@@ -8,12 +8,12 @@ DB_NAME = "debug.db"
 
 if os.path.exists(DB_NAME):
     os.remove(DB_NAME)
-    print(f"Старая база данных '{DB_NAME}' удалена.")
+    print(f"Old database '{DB_NAME}' deleted.")
 
 conn = sqlite3.connect(DB_NAME)
 cursor = conn.cursor()
 
-# --- Создание таблиц ---
+# --- Table Creation ---
 cursor.execute('''
 CREATE TABLE IF NOT EXISTS Nodes (
     id INTEGER PRIMARY KEY AUTOINCREMENT, RecordID INTEGER, SeqNum INTEGER,
@@ -34,41 +34,41 @@ CREATE TABLE IF NOT EXISTS TensorMap (
     FOREIGN KEY(NodeID) REFERENCES Nodes(id), FOREIGN KEY(TensorID) REFERENCES Tensors(ID)
 )''')
 
-# --- Генерация тестовых данных ---
+# --- Test Data Generation ---
 
-# ИЗМЕНЕНИЕ 1: Добавляем разные типы 2D тензоров с запоминающимися именами
+# CHANGE 1: Add different types of 2D tensors with memorable names
 layer_shapes = {
-    'Слой с 1D тензором': (10,),                                      # 1D
-    'Слой с широким тензором (горизонтальный)': (8, 32),               # 2D (ширина > высота)
-    'Слой с высоким тензором (вертикальный)': (32, 8),                # 2D (высота > ширина)
-    'Слой с квадратным тензором': (16, 16),                           # 2D (высота == ширина)
-    'Слой с 3D тензором': (4, 10, 16),                                # 3D
-    'Слой с 4D тензором (картинка)': (10, 3, 32, 32),                   # 4D
-    'Слой с 5D тензором (видео)': (10, 3, 16, 32, 32),                  # 5D
+    'Layer_with_1D_tensor': (10,),                                  # 1D
+    'Layer_with_wide_tensor_horizontal': (8, 32),                   # 2D (width > height)
+    'Layer_with_tall_tensor_vertical': (32, 8),                     # 2D (height > width)
+    'Layer_with_square_tensor': (16, 16),                           # 2D (height == width)
+    'Layer_with_3D_tensor': (4, 10, 16),                            # 3D
+    'Layer_with_4D_tensor_image': (10, 3, 32, 32),                  # 4D
+    'Layer_with_5D_tensor_video': (10, 3, 16, 32, 32),              # 5D
 }
 layers = list(layer_shapes.keys())
 
 def generate_tensor_data(shape, record_id):
-    """Генерирует данные для тензора в зависимости от RecordID."""
+    """Generates tensor data based on the RecordID."""
     size = np.prod(shape)
     if record_id == 1:
-        # Данные на основе синуса
+        # Sine-based data
         arr = np.sin(np.arange(size) * 0.1).astype(np.float32)
     elif record_id == 2:
-        # Данные на основе косинуса (чтобы разница была ненулевой)
+        # Cosine-based data (to ensure the difference is non-zero)
         arr = np.cos(np.arange(size) * 0.1).astype(np.float32)
     else: # record_id == 3
-        # Случайные данные
+        # Random data
         arr = np.random.rand(size).astype(np.float32)
     return arr.tobytes()
 
 records_to_generate = 3
 
 for record_id in range(1, records_to_generate + 1):
-    print(f"Генерация данных для Записи #{record_id}...")
+    print(f"Generating data for Record #{record_id}...")
     current_time = 0.0
     for i, layer_name in enumerate(layers):
-        # --- Генерация данных для Nodes ---
+        # --- Generate data for Nodes ---
         start_time = current_time + random.uniform(0.05, 0.3)
         duration = random.uniform(0.4, 1.8)
         end_time = start_time + duration
@@ -80,31 +80,31 @@ for record_id in range(1, records_to_generate + 1):
         current_node_id = cursor.lastrowid
         current_time = end_time
 
-        # --- Генерация данных для Tensors ---
+        # --- Generate data for Tensors ---
         base_shape = layer_shapes[layer_name]
         
-        # Для RecordID=3 делаем размерность немного другой
+        # For RecordID=3, make the dimensions slightly different
         if record_id == 3:
-            # Превращаем кортеж в список, изменяем, и обратно в кортеж
+            # Convert tuple to list, modify it, and convert back to tuple
             shape_list = list(base_shape)
-            shape_list[-1] += random.randint(1, 5) # Меняем последнее измерение
+            shape_list[-1] += random.randint(1, 5) # Change the last dimension
             current_shape = tuple(shape_list)
         else:
             current_shape = base_shape
 
         num_dims = len(current_shape)
         
-        # Заполняем shape до 5 элементов нулями для записи в БД
+        # Pad the shape with zeros up to 5 elements for DB insertion
         db_shape = list(current_shape) + [0] * (5 - num_dims)
         
         element_size = 4 # float32
         data_size_bytes = np.prod(current_shape) * element_size
         
-        # Генерируем разные данные для разных RecordID
+        # Generate different data for different RecordIDs
         blob_data = generate_tensor_data(current_shape, record_id)
 
-        # ИЗМЕНЕНИЕ 2: Имя тензора теперь будет очень описательным благодаря имени слоя
-        tensor_name = f"{layer_name.replace(' ', '_').replace('(', '').replace(')', '')}_output"
+        # CHANGE 2: The tensor name will now be very descriptive thanks to the layer name
+        tensor_name = f"{layer_name}_output"
         
         cursor.execute(
             """INSERT INTO Tensors 
@@ -114,7 +114,7 @@ for record_id in range(1, records_to_generate + 1):
         )
         current_tensor_id = cursor.lastrowid
 
-        # --- Связываем их в TensorMap ---
+        # --- Link them in TensorMap ---
         cursor.execute(
             "INSERT INTO TensorMap (NodeID, TensorID, IOType, IOidx) VALUES (?, ?, ?, ?)",
             (current_node_id, current_tensor_id, 1, 0)
@@ -123,8 +123,8 @@ for record_id in range(1, records_to_generate + 1):
 conn.commit()
 conn.close()
 
-print(f"\nБаза данных '{DB_NAME}' успешно создана со структурированными данными.")
-print("Теперь генерируются горизонтальные, вертикальные и квадратные 2D тензоры.")
-print("Тензоры для Записи #1 и #2 совместимы.")
-print("Тензоры для Записи #3 имеют немного другие размерности.")
-print("Можно запускать основной файл приложения.")
+print(f"\nDatabase '{DB_NAME}' successfully created with structured data.")
+print("Horizontal, vertical, and square 2D tensors are now being generated.")
+print("Tensors for Record #1 and #2 are compatible.")
+print("Tensors for Record #3 have slightly different dimensions.")
+print("The main application file can now be run.")
