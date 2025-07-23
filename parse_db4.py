@@ -264,6 +264,9 @@ class TensorViewer(ttk.Frame):
 # =====================================================================================
 #  Вкладка для анализа тензоров (использует новый TensorViewer)
 # =====================================================================================
+# =====================================================================================
+#  Вкладка для анализа тензоров с "ленивой" загрузкой BLOB
+# =====================================================================================
 class TensorTab(ttk.Frame):
     def __init__(self, parent):
         super().__init__(parent)
@@ -277,7 +280,7 @@ class TensorTab(ttk.Frame):
         control_frame = ttk.Frame(main_frame)
         control_frame.pack(fill=tk.X, pady=(0, 20))
         
-        load_button = ttk.Button(control_frame, text="Load Tensors from DB", command=self._load_tensors)
+        load_button = ttk.Button(control_frame, text="Load Tensors from DB", command=self._load_tensors_metadata)
         load_button.pack(side=tk.LEFT)
 
         selection_frame = ttk.LabelFrame(main_frame, text="Tensor Selection", padding="10")
@@ -300,14 +303,16 @@ class TensorTab(ttk.Frame):
 
         self.tensor_viewer = TensorViewer(result_frame)
 
-    def _load_tensors(self):
+    def _load_tensors_metadata(self):
+        """ИЗМЕНЕНИЕ: Загружает ТОЛЬКО метаданные, без BLOB."""
         try:
             conn = sqlite3.connect('debug.db')
             cursor = conn.cursor()
+            # ИЗМЕНЕНИЕ: Убрали T.Data из запроса
             query = """
                 SELECT
                     T.Name, N.RecordID, T.ID as TensorID, T.Datatype, T.NumDims,
-                    T.Shape0, T.Shape1, T.Shape2, T.Shape3, T.Shape4, T.Data
+                    T.Shape0, T.Shape1, T.Shape2, T.Shape3, T.Shape4
                 FROM Tensors T
                 JOIN TensorMap TM ON T.ID = TM.TensorID
                 JOIN Nodes N ON TM.NodeID = N.id
@@ -315,26 +320,26 @@ class TensorTab(ttk.Frame):
                 ORDER BY T.Name, N.RecordID
             """
             cursor.execute(query)
-            tensor_data = cursor.fetchall()
+            tensor_metadata = cursor.fetchall()
             conn.close()
         except sqlite3.OperationalError as e:
-            messagebox.showerror("Database Error", f"Could not read tensor data from 'debug.db'.\nError: {e}")
+            messagebox.showerror("Database Error", f"Could not read tensor metadata from 'debug.db'.\nError: {e}")
             return
 
-        if not tensor_data:
+        if not tensor_metadata:
             messagebox.showinfo("No Data", "No tensors found in the database.")
             return
 
         self.tensor_map.clear()
         display_names = []
-        for row in tensor_data:
+        for row in tensor_metadata:
             display_name = f"{row[0]} (Record: {row[1]})"
             display_names.append(display_name)
+            # ИЗМЕНЕНИЕ: Не храним "blob" в словаре
             self.tensor_map[display_name] = {
                 "name": row[0], "record_id": row[1], "tensor_id": row[2],
                 "datatype": row[3], "dims": row[4], 
-                "shape": tuple(s for s in row[5:10] if s > 0),
-                "blob": row[10]
+                "shape": tuple(s for s in row[5:10] if s > 0)
             }
         
         self.first_tensor_combo['values'] = display_names
@@ -343,7 +348,7 @@ class TensorTab(ttk.Frame):
         self.second_tensor_combo['values'] = []
         self.second_tensor_combo.config(state="disabled")
         self.tensor_viewer.set_tensor(None)
-        messagebox.showinfo("Success", f"{len(display_names)} tensors loaded successfully.")
+        messagebox.showinfo("Success", f"{len(display_names)} tensor metadata entries loaded successfully.")
 
     def _on_first_tensor_select(self, event=None):
         selected_display_name = self.first_tensor_combo.get()
@@ -363,11 +368,35 @@ class TensorTab(ttk.Frame):
         if not tensor1_name or not tensor2_name: return
         self._calculate_and_display_diff(tensor1_name, tensor2_name)
 
+    def _fetch_blob_by_id(self, tensor_id):
+        """НОВЫЙ МЕТОД: Делает точечный запрос в БД для получения одного BLOB."""
+        try:
+            conn = sqlite3.connect('debug.db')
+            cursor = conn.cursor()
+            cursor.execute("SELECT Data FROM Tensors WHERE ID = ?", (tensor_id,))
+            result = cursor.fetchone()
+            conn.close()
+            if result:
+                return result[0]
+            else:
+                messagebox.showerror("Data Error", f"Could not find BLOB for TensorID {tensor_id}.")
+                return None
+        except sqlite3.OperationalError as e:
+            messagebox.showerror("Database Error", f"Failed to fetch BLOB for TensorID {tensor_id}.\nError: {e}")
+            return None
+
     def _get_tensor_as_numpy(self, name):
+        """ИЗМЕНЕНИЕ: Теперь сначала получает BLOB, потом конвертирует."""
         info = self.tensor_map[name]
-        blob, shape = info['blob'], info['shape']
-        dtype = np.float32 if info['datatype'] == 0 else np.int32
         
+        # 1. Получаем BLOB из БД по ID
+        blob = self._fetch_blob_by_id(info['tensor_id'])
+        if blob is None:
+            return None
+
+        # 2. Конвертируем (остальная логика без изменений)
+        shape = info['shape']
+        dtype = np.float32 if info['datatype'] == 0 else np.int32
         try:
             arr_1d = np.frombuffer(blob, dtype=dtype)
             return arr_1d.reshape(shape)
@@ -376,6 +405,7 @@ class TensorTab(ttk.Frame):
             return None
 
     def _calculate_and_display_diff(self, name1, name2):
+        # Этот метод теперь работает с "ленивой" загрузкой без изменений
         tensor1 = self._get_tensor_as_numpy(name1)
         tensor2 = self._get_tensor_as_numpy(name2)
 
