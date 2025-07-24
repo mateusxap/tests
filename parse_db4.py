@@ -286,17 +286,28 @@ class TensorTab(ttk.Frame):
         selection_frame = ttk.LabelFrame(main_frame, text="Tensor Selection", padding="10")
         selection_frame.pack(fill=tk.X)
 
-        ttk.Label(selection_frame, text="1. Select First Tensor:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        self.first_tensor_combo = ttk.Combobox(selection_frame, state="readonly", width=50)
-        self.first_tensor_combo.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+        # --- ИЗМЕНЕНИЕ: Переход от grid к pack для кросс-платформенной надежности ---
+        
+        # --- Строка 1 ---
+        row1_frame = ttk.Frame(selection_frame)
+        row1_frame.pack(fill=tk.X, expand=True, pady=2)
+        
+        ttk.Label(row1_frame, text="1. Select First Tensor:").pack(side=tk.LEFT, padx=5)
+        self.first_tensor_combo = ttk.Combobox(row1_frame, state="readonly", width=50)
+        # fill=tk.X и expand=True заставляют комбобокс занять все оставшееся место
+        self.first_tensor_combo.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         self.first_tensor_combo.bind("<<ComboboxSelected>>", self._on_first_tensor_select)
 
-        ttk.Label(selection_frame, text="2. Select Second Tensor (for comparison):").grid(row=1, column=0, padx=5, pady=5, sticky="w")
-        self.second_tensor_combo = ttk.Combobox(selection_frame, state="disabled", width=50)
-        self.second_tensor_combo.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+        # --- Строка 2 ---
+        row2_frame = ttk.Frame(selection_frame)
+        row2_frame.pack(fill=tk.X, expand=True, pady=2)
+
+        ttk.Label(row2_frame, text="2. Select Second Tensor (for comparison):").pack(side=tk.LEFT, padx=5)
+        self.second_tensor_combo = ttk.Combobox(row2_frame, state="disabled", width=50)
+        self.second_tensor_combo.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         self.second_tensor_combo.bind("<<ComboboxSelected>>", self._on_second_tensor_select)
         
-        selection_frame.columnconfigure(1, weight=1)
+        # selection_frame.columnconfigure(1, weight=1) # Больше не нужно для pack
 
         result_frame = ttk.LabelFrame(main_frame, text="Resulting Difference Tensor", padding="10")
         result_frame.pack(fill=tk.BOTH, expand=True, pady=(20, 0))
