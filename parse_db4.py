@@ -19,6 +19,7 @@ class TensorViewer(ttk.Frame):
 
         self.tensor = None
         self.current_slice = None
+        self.dim_labels = [] # Будет хранить ('N', 'C', 'H', 'W')
         
         self._pan_start_pixel = None
         self._pan_start_xlim = None
@@ -35,25 +36,21 @@ class TensorViewer(ttk.Frame):
         self.fig = Figure(figsize=(5, 4), dpi=100)
         self.ax = self.fig.add_subplot(111)
         
-        # --- ИСПРАВЛЕННАЯ КОМПОНОВКА ---
-        # 1. Сначала нижняя панель управления
         controls_area = ttk.Frame(self)
         controls_area.pack(side=tk.BOTTOM, fill=tk.X, pady=5)
 
-        # 2. Теперь холст занимает все ОСТАВШЕЕСЯ пространство
         self.canvas = FigureCanvasTkAgg(self.fig, master=self)
         self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-        # --- СТАТИЧЕСКОЕ СОЗДАНИЕ ВСЕХ ЭЛЕМЕНТОВ УПРАВЛЕНИЯ ---
         axis_selection_frame = ttk.Frame(controls_area)
         axis_selection_frame.pack(pady=5)
         
         ttk.Label(axis_selection_frame, text="Y-Axis:").pack(side=tk.LEFT, padx=(0, 5))
-        self.y_axis_combo = ttk.Combobox(axis_selection_frame, textvariable=self.y_axis_var, state='disabled', width=8)
+        self.y_axis_combo = ttk.Combobox(axis_selection_frame, textvariable=self.y_axis_var, state='disabled', width=12)
         self.y_axis_combo.pack(side=tk.LEFT)
         
         ttk.Label(axis_selection_frame, text="X-Axis:").pack(side=tk.LEFT, padx=(10, 5))
-        self.x_axis_combo = ttk.Combobox(axis_selection_frame, textvariable=self.x_axis_var, state='disabled', width=8)
+        self.x_axis_combo = ttk.Combobox(axis_selection_frame, textvariable=self.x_axis_var, state='disabled', width=12)
         self.x_axis_combo.pack(side=tk.LEFT)
 
         self.y_axis_combo.bind("<<ComboboxSelected>>", self._on_axis_selection_change)
@@ -72,8 +69,17 @@ class TensorViewer(ttk.Frame):
         self.canvas.mpl_connect('button_release_event', self._on_pan_end)
         self.canvas.mpl_connect('motion_notify_event', self._on_pan_move)
 
+    def _get_dim_labels(self, ndim):
+        """Возвращает семантические имена для измерений."""
+        if ndim == 1: return ('W',)
+        if ndim == 2: return ('H', 'W')
+        if ndim == 3: return ('C', 'H', 'W')
+        if ndim == 4: return ('N', 'C', 'H', 'W')
+        if ndim == 5: return ('N', 'C', 'D', 'H', 'W')
+        # Запасной вариант для > 5 измерений
+        return tuple(f"Dim {i}" for i in range(ndim))
+
     def _create_sliders_placeholders(self):
-        """Создает максимальное количество ползунков в __init__ и хранит их."""
         max_sliders = 5 
         for i in range(max_sliders):
             frame = ttk.Frame(self.sliders_frame)
@@ -85,7 +91,7 @@ class TensorViewer(ttk.Frame):
             scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
             value_label.pack(side=tk.LEFT)
             self.slice_sliders[i] = {'frame': frame, 'var': var, 'scale': scale, 'label': label}
-            frame.pack_forget() # Сразу скрываем
+            frame.pack_forget()
 
     def set_tensor(self, tensor_data):
         self.tensor = tensor_data
@@ -94,46 +100,65 @@ class TensorViewer(ttk.Frame):
             self.y_axis_combo.config(state='disabled', values=[])
             self.x_axis_var.set('')
             self.y_axis_var.set('')
+            self.dim_labels = []
         else:
             ndim = self.tensor.ndim
-            axis_choices = [f"Dim {i}" for i in range(ndim)]
+            self.dim_labels = self._get_dim_labels(ndim)
+            # Формируем список для комбобокса: "Имя (Dim индекс)"
+            axis_choices = [f"{name} (Dim {i})" for i, name in enumerate(self.dim_labels)]
+            
             self.x_axis_combo.config(state='readonly', values=axis_choices)
             self.y_axis_combo.config(state='readonly', values=axis_choices)
-            self.y_axis_var.set(f"Dim {ndim - 2}")
-            self.x_axis_var.set(f"Dim {ndim - 1}")
+            
+            # Устанавливаем значения по умолчанию на H и W
+            y_default_idx = ndim - 2
+            x_default_idx = ndim - 1
+            self.y_axis_var.set(axis_choices[y_default_idx])
+            self.x_axis_var.set(axis_choices[x_default_idx])
+            
             self._prev_y_axis = self.y_axis_var.get()
             self._prev_x_axis = self.x_axis_var.get()
+            
         self._setup_sliders()
         self._update_view()
 
     def _setup_sliders(self):
-        """Настраивает и управляет видимостью существующих ползунков."""
         if self.tensor is None or self.tensor.ndim < 2:
             for slider_pack in self.slice_sliders.values():
                 slider_pack['frame'].pack_forget()
             return
 
         try:
-            y_idx = int(self.y_axis_var.get().split(' ')[1])
-            x_idx = int(self.x_axis_var.get().split(' ')[1])
+            # Извлекаем индекс из строки "Name (Dim index)"
+            y_idx = int(self.y_axis_var.get().split(' ')[-1][:-1])
+            x_idx = int(self.x_axis_var.get().split(' ')[-1][:-1])
         except (ValueError, IndexError): return
 
         plot_axes = {y_idx, x_idx}
         
-        for dim_idx, slider_pack in self.slice_sliders.items():
-            frame = slider_pack['frame']
-            if dim_idx < self.tensor.ndim and dim_idx not in plot_axes:
+        # Используем enumerate для отслеживания, какой по счету ползунок мы настраиваем
+        visible_slider_count = 0
+        for dim_idx in range(self.tensor.ndim):
+            if dim_idx not in plot_axes:
+                slider_pack = self.slice_sliders[visible_slider_count]
+                frame = slider_pack['frame']
                 dim_shape = self.tensor.shape[dim_idx]
+                
                 if dim_shape > 1:
-                    slider_pack['label'].config(text=f"Dim {dim_idx}:")
+                    # Устанавливаем семантическое имя
+                    slider_pack['label'].config(text=f"{self.dim_labels[dim_idx]}:")
                     slider_pack['var'].set(0)
                     slider_pack['scale'].config(from_=0, to=dim_shape - 1, state='normal')
                     frame.pack(fill=tk.X, padx=5, pady=2)
                 else:
                     slider_pack['var'].set(0)
                     frame.pack_forget()
-            else:
-                frame.pack_forget()
+                
+                visible_slider_count += 1
+
+        # Скрываем все оставшиеся неиспользуемые ползунки
+        for i in range(visible_slider_count, len(self.slice_sliders)):
+            self.slice_sliders[i]['frame'].pack_forget()
 
     def _on_axis_selection_change(self, event=None):
         y_val, x_val = self.y_axis_var.get(), self.x_axis_var.get()
@@ -228,8 +253,8 @@ class TensorViewer(ttk.Frame):
             return
         
         try:
-            y_idx = int(self.y_axis_var.get().split(' ')[1])
-            x_idx = int(self.x_axis_var.get().split(' ')[1])
+            y_idx = int(self.y_axis_var.get().split(' ')[-1][:-1])
+            x_idx = int(self.x_axis_var.get().split(' ')[-1][:-1])
         except (ValueError, IndexError): return
 
         slicer = [0] * self.tensor.ndim
@@ -237,11 +262,12 @@ class TensorViewer(ttk.Frame):
         slicer[x_idx] = slice(None)
         
         plot_axes = {y_idx, x_idx}
+        visible_slider_count = 0
         for dim_idx in range(self.tensor.ndim):
             if dim_idx not in plot_axes:
-                # Проверяем, существует ли ползунок для этого измерения
-                if dim_idx in self.slice_sliders:
-                    slicer[dim_idx] = self.slice_sliders[dim_idx]['var'].get()
+                slider_pack = self.slice_sliders[visible_slider_count]
+                slicer[dim_idx] = slider_pack['var'].get()
+                visible_slider_count += 1
         
         self.current_slice = self.tensor[tuple(slicer)]
         
@@ -256,14 +282,13 @@ class TensorViewer(ttk.Frame):
         else:
             self.colorbar.update_normal(im)
 
-        self.ax.set_title(f"Slice Y:D{y_idx}, X:D{x_idx}")
-        self.ax.set_xlabel(f"Dimension {x_idx}")
-        self.ax.set_ylabel(f"Dimension {y_idx}")
+        y_label = self.y_axis_var.get()
+        x_label = self.x_axis_var.get()
+        self.ax.set_title(f"Slice Y:{y_label}, X:{x_label}")
+        self.ax.set_xlabel(x_label)
+        self.ax.set_ylabel(y_label)
         
         self.canvas.get_tk_widget().after(1, self._center_and_set_view)
-# =====================================================================================
-#  Вкладка для анализа тензоров (использует новый TensorViewer)
-# =====================================================================================
 # =====================================================================================
 #  Вкладка для анализа тензоров с "ленивой" загрузкой BLOB
 # =====================================================================================
