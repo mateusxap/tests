@@ -19,7 +19,7 @@ class TensorViewer(ttk.Frame):
         self.tensor = None
         self.current_slice = None
         self.dim_labels = []
-        self.is_reshaped = False # Флаг для "особенных" тензоров
+        self.is_reshaped = False
         
         self._pan_start_pixel = None
         self._pan_start_xlim = None
@@ -93,8 +93,7 @@ class TensorViewer(ttk.Frame):
 
     def set_tensor(self, tensor_data):
         self.tensor = tensor_data
-        self.is_reshaped = False # Сбрасываем флаг
-
+        self.is_reshaped = False
         if self.tensor is None:
             self.x_axis_combo.config(state='disabled', values=[])
             self.y_axis_combo.config(state='disabled', values=[])
@@ -102,60 +101,46 @@ class TensorViewer(ttk.Frame):
             self.y_axis_var.set('')
             self.dim_labels = []
         else:
-            # --- ИЗМЕНЕНИЕ ЗДЕСЬ: Обработка 0D и 1D тензоров ---
             if self.tensor.ndim == 0:
-                # Превращаем скаляр в 2D массив 1x1
                 self.tensor = self.tensor.reshape(1, 1)
                 self.is_reshaped = True
             elif self.tensor.ndim == 1:
-                # Превращаем вектор в 2D массив 1xN
                 self.tensor = self.tensor.reshape(1, -1)
                 self.is_reshaped = True
-
             ndim = self.tensor.ndim
             self.dim_labels = self._get_dim_labels(ndim)
             axis_choices = [f"{name} (Dim {i})" for i, name in enumerate(self.dim_labels)]
-            
             if self.is_reshaped:
-                # Блокируем выбор осей для преобразованных тензоров
                 self.x_axis_combo.config(state='disabled', values=axis_choices)
                 self.y_axis_combo.config(state='disabled', values=axis_choices)
             else:
                 self.x_axis_combo.config(state='readonly', values=axis_choices)
                 self.y_axis_combo.config(state='readonly', values=axis_choices)
-            
             y_default_idx = ndim - 2
             x_default_idx = ndim - 1
             self.y_axis_var.set(axis_choices[y_default_idx])
             self.x_axis_var.set(axis_choices[x_default_idx])
-            
             self._prev_y_axis = self.y_axis_var.get()
             self._prev_x_axis = self.x_axis_var.get()
-            
         self._setup_sliders()
         self._update_view()
 
     def _setup_sliders(self):
-        # Для преобразованных тензоров ползунки не нужны
         if self.tensor is None or self.is_reshaped:
             for slider_pack in self.slice_sliders.values():
                 slider_pack['frame'].pack_forget()
             return
-
         try:
             y_idx = int(self.y_axis_var.get().split(' ')[-1][:-1])
             x_idx = int(self.x_axis_var.get().split(' ')[-1][:-1])
         except (ValueError, IndexError): return
-
         plot_axes = {y_idx, x_idx}
-        
         visible_slider_count = 0
         for dim_idx in range(self.tensor.ndim):
             if dim_idx not in plot_axes:
                 slider_pack = self.slice_sliders[visible_slider_count]
                 frame = slider_pack['frame']
                 dim_shape = self.tensor.shape[dim_idx]
-                
                 if dim_shape > 1:
                     slider_pack['label'].config(text=f"{self.dim_labels[dim_idx]}:")
                     slider_pack['var'].set(0)
@@ -164,9 +149,7 @@ class TensorViewer(ttk.Frame):
                 else:
                     slider_pack['var'].set(0)
                     frame.pack_forget()
-                
                 visible_slider_count += 1
-
         for i in range(visible_slider_count, len(self.slice_sliders)):
             self.slice_sliders[i]['frame'].pack_forget()
 
@@ -237,19 +220,27 @@ class TensorViewer(ttk.Frame):
         if not (ax_bbox.width > 0 and ax_bbox.height > 0):
             self.canvas.get_tk_widget().after(10, self._center_and_set_view)
             return
+        
+        # --- ИЗМЕНЕНИЕ: Корректируем пределы для pcolormesh ---
+        # pcolormesh рисует ячейки МЕЖДУ координатами, поэтому пределы от 0 до W/H
+        xlim_data = (0, w)
+        ylim_data = (0, h)
+        
         aspect_data = w / h if h > 0 else 1
         aspect_ax = ax_bbox.width / ax_bbox.height
         self.ax.set_aspect('equal')
+
         if aspect_data > aspect_ax:
-            self.ax.set_xlim(-0.5, w - 0.5)
+            self.ax.set_xlim(xlim_data)
             required_height = w / aspect_ax
             margin_y = (required_height - h) / 2
-            self.ax.set_ylim(h - 0.5 + margin_y, -0.5 - margin_y)
+            self.ax.set_ylim(h + margin_y, -margin_y)
         else:
-            self.ax.set_ylim(h - 0.5, -0.5)
+            self.ax.set_ylim(ylim_data)
             required_width = h * aspect_ax
             margin_x = (required_width - w) / 2
-            self.ax.set_xlim(-0.5 - margin_x, w - 0.5 + margin_x)
+            self.ax.set_xlim(-margin_x, w + margin_x)
+        
         self.canvas.draw_idle()
 
     def _update_view(self):
@@ -263,18 +254,15 @@ class TensorViewer(ttk.Frame):
             return
         
         if self.is_reshaped:
-            # Для преобразованных тензоров срез не нужен, они уже 2D
             self.current_slice = self.tensor
         else:
             try:
                 y_idx = int(self.y_axis_var.get().split(' ')[-1][:-1])
                 x_idx = int(self.x_axis_var.get().split(' ')[-1][:-1])
             except (ValueError, IndexError): return
-
             slicer = [0] * self.tensor.ndim
             slicer[y_idx] = slice(None)
             slicer[x_idx] = slice(None)
-            
             plot_axes = {y_idx, x_idx}
             visible_slider_count = 0
             for dim_idx in range(self.tensor.ndim):
@@ -282,29 +270,27 @@ class TensorViewer(ttk.Frame):
                     slider_pack = self.slice_sliders[visible_slider_count]
                     slicer[dim_idx] = slider_pack['var'].get()
                     visible_slider_count += 1
-            
             self.current_slice = self.tensor[tuple(slicer)]
         
         vmin = 0
         vmax = np.max(self.current_slice)
         if vmax == 0: vmax = 1.0
         
-        im = self.ax.imshow(self.current_slice, cmap='viridis', interpolation='nearest', vmin=vmin, vmax=vmax)
+        # --- ИЗМЕНЕНИЕ: Заменяем imshow на pcolormesh ---
+        im = self.ax.pcolormesh(
+            self.current_slice, cmap='viridis', vmin=vmin, vmax=vmax,
+            edgecolors='black', linewidth=0.5
+        )
         
         if not hasattr(self, 'colorbar') or self.colorbar.ax is None or self.colorbar.ax.figure != self.fig:
              self.colorbar = self.fig.colorbar(im, ax=self.ax)
         else:
             self.colorbar.update_normal(im)
 
-        # --- ИЗМЕНЕНИЕ ЗДЕСЬ: Упрощенные подписи для преобразованных тензоров ---
         if self.is_reshaped:
             self.ax.set_title("Tensor Value")
-            # Убираем семантические подписи, но оставляем числовые деления
             self.ax.set_xlabel("")
             self.ax.set_ylabel("")
-            # Строки ниже УДАЛЕНЫ:
-            # self.ax.set_xticks([])
-            # self.ax.set_yticks([])
         else:
             y_label = self.y_axis_var.get()
             x_label = self.x_axis_var.get()
@@ -312,9 +298,6 @@ class TensorViewer(ttk.Frame):
             self.ax.set_xlabel(x_label)
             self.ax.set_ylabel(y_label)
         
-        
-        self.canvas.get_tk_widget().after(1, self._center_and_set_view)
-#  Вкладка для анализа тензоров с "ленивой" загрузкой BLOB
 # =====================================================================================
 class TensorTab(ttk.Frame):
     def __init__(self, parent):
