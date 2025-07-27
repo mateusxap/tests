@@ -8,9 +8,8 @@ import numpy as np
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 from skimage.measure import block_reduce # Для max-пулинга
-
 # =====================================================================================
-#  ФИНАЛЬНЫЙ, ОБЪЕДИНЕННЫЙ виджет для визуализации N-мерного тензора
+#  ФИНАЛЬНАЯ ВЕРСИЯ с обработкой 0D и 1D тензоров
 # =====================================================================================
 class TensorViewer(ttk.Frame):
     def __init__(self, parent):
@@ -19,7 +18,8 @@ class TensorViewer(ttk.Frame):
 
         self.tensor = None
         self.current_slice = None
-        self.dim_labels = [] # Будет хранить ('N', 'C', 'H', 'W')
+        self.dim_labels = []
+        self.is_reshaped = False # Флаг для "особенных" тензоров
         
         self._pan_start_pixel = None
         self._pan_start_xlim = None
@@ -70,13 +70,11 @@ class TensorViewer(ttk.Frame):
         self.canvas.mpl_connect('motion_notify_event', self._on_pan_move)
 
     def _get_dim_labels(self, ndim):
-        """Возвращает семантические имена для измерений."""
         if ndim == 1: return ('W',)
         if ndim == 2: return ('H', 'W')
         if ndim == 3: return ('C', 'H', 'W')
         if ndim == 4: return ('N', 'C', 'H', 'W')
         if ndim == 5: return ('N', 'C', 'D', 'H', 'W')
-        # Запасной вариант для > 5 измерений
         return tuple(f"Dim {i}" for i in range(ndim))
 
     def _create_sliders_placeholders(self):
@@ -95,22 +93,37 @@ class TensorViewer(ttk.Frame):
 
     def set_tensor(self, tensor_data):
         self.tensor = tensor_data
-        if self.tensor is None or self.tensor.ndim < 2:
+        self.is_reshaped = False # Сбрасываем флаг
+
+        if self.tensor is None:
             self.x_axis_combo.config(state='disabled', values=[])
             self.y_axis_combo.config(state='disabled', values=[])
             self.x_axis_var.set('')
             self.y_axis_var.set('')
             self.dim_labels = []
         else:
+            # --- ИЗМЕНЕНИЕ ЗДЕСЬ: Обработка 0D и 1D тензоров ---
+            if self.tensor.ndim == 0:
+                # Превращаем скаляр в 2D массив 1x1
+                self.tensor = self.tensor.reshape(1, 1)
+                self.is_reshaped = True
+            elif self.tensor.ndim == 1:
+                # Превращаем вектор в 2D массив 1xN
+                self.tensor = self.tensor.reshape(1, -1)
+                self.is_reshaped = True
+
             ndim = self.tensor.ndim
             self.dim_labels = self._get_dim_labels(ndim)
-            # Формируем список для комбобокса: "Имя (Dim индекс)"
             axis_choices = [f"{name} (Dim {i})" for i, name in enumerate(self.dim_labels)]
             
-            self.x_axis_combo.config(state='readonly', values=axis_choices)
-            self.y_axis_combo.config(state='readonly', values=axis_choices)
+            if self.is_reshaped:
+                # Блокируем выбор осей для преобразованных тензоров
+                self.x_axis_combo.config(state='disabled', values=axis_choices)
+                self.y_axis_combo.config(state='disabled', values=axis_choices)
+            else:
+                self.x_axis_combo.config(state='readonly', values=axis_choices)
+                self.y_axis_combo.config(state='readonly', values=axis_choices)
             
-            # Устанавливаем значения по умолчанию на H и W
             y_default_idx = ndim - 2
             x_default_idx = ndim - 1
             self.y_axis_var.set(axis_choices[y_default_idx])
@@ -123,20 +136,19 @@ class TensorViewer(ttk.Frame):
         self._update_view()
 
     def _setup_sliders(self):
-        if self.tensor is None or self.tensor.ndim < 2:
+        # Для преобразованных тензоров ползунки не нужны
+        if self.tensor is None or self.is_reshaped:
             for slider_pack in self.slice_sliders.values():
                 slider_pack['frame'].pack_forget()
             return
 
         try:
-            # Извлекаем индекс из строки "Name (Dim index)"
             y_idx = int(self.y_axis_var.get().split(' ')[-1][:-1])
             x_idx = int(self.x_axis_var.get().split(' ')[-1][:-1])
         except (ValueError, IndexError): return
 
         plot_axes = {y_idx, x_idx}
         
-        # Используем enumerate для отслеживания, какой по счету ползунок мы настраиваем
         visible_slider_count = 0
         for dim_idx in range(self.tensor.ndim):
             if dim_idx not in plot_axes:
@@ -145,7 +157,6 @@ class TensorViewer(ttk.Frame):
                 dim_shape = self.tensor.shape[dim_idx]
                 
                 if dim_shape > 1:
-                    # Устанавливаем семантическое имя
                     slider_pack['label'].config(text=f"{self.dim_labels[dim_idx]}:")
                     slider_pack['var'].set(0)
                     slider_pack['scale'].config(from_=0, to=dim_shape - 1, state='normal')
@@ -156,7 +167,6 @@ class TensorViewer(ttk.Frame):
                 
                 visible_slider_count += 1
 
-        # Скрываем все оставшиеся неиспользуемые ползунки
         for i in range(visible_slider_count, len(self.slice_sliders)):
             self.slice_sliders[i]['frame'].pack_forget()
 
@@ -244,7 +254,7 @@ class TensorViewer(ttk.Frame):
 
     def _update_view(self):
         self.ax.clear()
-        if self.tensor is None or self.tensor.ndim < 2:
+        if self.tensor is None:
             self.ax.set_aspect('auto')
             self.ax.set_xlim(0, 1); self.ax.set_ylim(0, 1)
             self.ax.text(0.5, 0.5, "No Tensor Data", ha="center", va="center", transform=self.ax.transAxes)
@@ -252,24 +262,28 @@ class TensorViewer(ttk.Frame):
             self.canvas.draw()
             return
         
-        try:
-            y_idx = int(self.y_axis_var.get().split(' ')[-1][:-1])
-            x_idx = int(self.x_axis_var.get().split(' ')[-1][:-1])
-        except (ValueError, IndexError): return
+        if self.is_reshaped:
+            # Для преобразованных тензоров срез не нужен, они уже 2D
+            self.current_slice = self.tensor
+        else:
+            try:
+                y_idx = int(self.y_axis_var.get().split(' ')[-1][:-1])
+                x_idx = int(self.x_axis_var.get().split(' ')[-1][:-1])
+            except (ValueError, IndexError): return
 
-        slicer = [0] * self.tensor.ndim
-        slicer[y_idx] = slice(None)
-        slicer[x_idx] = slice(None)
-        
-        plot_axes = {y_idx, x_idx}
-        visible_slider_count = 0
-        for dim_idx in range(self.tensor.ndim):
-            if dim_idx not in plot_axes:
-                slider_pack = self.slice_sliders[visible_slider_count]
-                slicer[dim_idx] = slider_pack['var'].get()
-                visible_slider_count += 1
-        
-        self.current_slice = self.tensor[tuple(slicer)]
+            slicer = [0] * self.tensor.ndim
+            slicer[y_idx] = slice(None)
+            slicer[x_idx] = slice(None)
+            
+            plot_axes = {y_idx, x_idx}
+            visible_slider_count = 0
+            for dim_idx in range(self.tensor.ndim):
+                if dim_idx not in plot_axes:
+                    slider_pack = self.slice_sliders[visible_slider_count]
+                    slicer[dim_idx] = slider_pack['var'].get()
+                    visible_slider_count += 1
+            
+            self.current_slice = self.tensor[tuple(slicer)]
         
         vmin = 0
         vmax = np.max(self.current_slice)
@@ -282,14 +296,24 @@ class TensorViewer(ttk.Frame):
         else:
             self.colorbar.update_normal(im)
 
-        y_label = self.y_axis_var.get()
-        x_label = self.x_axis_var.get()
-        self.ax.set_title(f"Slice Y:{y_label}, X:{x_label}")
-        self.ax.set_xlabel(x_label)
-        self.ax.set_ylabel(y_label)
+        # --- ИЗМЕНЕНИЕ ЗДЕСЬ: Упрощенные подписи для преобразованных тензоров ---
+        if self.is_reshaped:
+            self.ax.set_title("Tensor Value")
+            # Убираем семантические подписи, но оставляем числовые деления
+            self.ax.set_xlabel("")
+            self.ax.set_ylabel("")
+            # Строки ниже УДАЛЕНЫ:
+            # self.ax.set_xticks([])
+            # self.ax.set_yticks([])
+        else:
+            y_label = self.y_axis_var.get()
+            x_label = self.x_axis_var.get()
+            self.ax.set_title(f"Slice Y:{y_label}, X:{x_label}")
+            self.ax.set_xlabel(x_label)
+            self.ax.set_ylabel(y_label)
+        
         
         self.canvas.get_tk_widget().after(1, self._center_and_set_view)
-# =====================================================================================
 #  Вкладка для анализа тензоров с "ленивой" загрузкой BLOB
 # =====================================================================================
 class TensorTab(ttk.Frame):
