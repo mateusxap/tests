@@ -33,7 +33,6 @@ class TensorViewer(ttk.Frame):
         self.fig = Figure(figsize=(5, 4), dpi=100)
         self.ax = self.fig.add_subplot(111)
         
-        # --- НОВОЕ: Привязываем нашу кастомную функцию форматирования координат ---
         self.ax.format_coord = self._format_coord
 
         toolbar_frame = ttk.Frame(self)
@@ -42,8 +41,9 @@ class TensorViewer(ttk.Frame):
         self.canvas = FigureCanvasTkAgg(self.fig, master=self)
         self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         
-        toolbar = NavigationToolbar2Tk(self.canvas, toolbar_frame)
-        toolbar.update()
+        # --- ИЗМЕНЕНИЕ 1: Сохраняем тулбар как атрибут класса ---
+        self.toolbar = NavigationToolbar2Tk(self.canvas, toolbar_frame)
+        self.toolbar.update()
 
         controls_area = ttk.Frame(self)
         controls_area.pack(side=tk.BOTTOM, fill=tk.X, pady=5)
@@ -72,22 +72,14 @@ class TensorViewer(ttk.Frame):
 
         self.canvas.mpl_connect('scroll_event', self._on_zoom)
 
-    # --- НОВЫЙ МЕТОД ---
     def _format_coord(self, x, y):
-        """Кастомная функция для отображения целочисленных координат и значения."""
-        if self.current_slice is None:
-            return "" # Ничего не показываем, если нет данных
-
-        # Округляем координаты до ближайшего целого индекса
-        col = int(round(x))
-        row = int(round(y))
-
+        if self.current_slice is None: return ""
+        col, row = int(round(x)), int(round(y))
         h, w = self.current_slice.shape
-
-        # Проверяем, находится ли курсор в пределах изображения
         if 0 <= col < w and 0 <= row < h:
             value = self.current_slice[row, col]
-            # Возвращаем строку с индексами и значением
+            return f'x={col}, y={row}  value={value:.4f}'
+        else:
             return f'x={col}, y={row}'
 
     def _get_dim_labels(self, ndim):
@@ -143,6 +135,11 @@ class TensorViewer(ttk.Frame):
             self.x_axis_var.set(axis_choices[x_default_idx])
             self._prev_y_axis = self.y_axis_var.get()
             self._prev_x_axis = self.x_axis_var.get()
+            
+            # --- ИЗМЕНЕНИЕ 2: Активируем режим панорамирования по умолчанию ---
+            if self.toolbar.mode != 'pan/zoom':
+                self.toolbar.pan()
+
         self._setup_sliders()
         self._update_view()
 
