@@ -268,31 +268,26 @@ class TensorViewer(ttk.Frame):
             self.ax.set_xlabel(x_label)
             self.ax.set_ylabel(y_label)
         self.canvas.get_tk_widget().after(1, self._center_and_set_view)
-# =====================================================================================
-# =====================================================================================
-#  Вкладка для анализа тензоров с использованием Treeview для выбора
-# =====================================================================================
-# =====================================================================================
-#  Вкладка для анализа тензоров с компоновкой "панель слева, график справа"
-# =====================================================================================
+
 class TensorTab(ttk.Frame):
     def __init__(self, parent):
         super().__init__(parent)
         self.pack(fill="both", expand=True)
 
         self.tensor_map = {}
+        self.blob_cache = {} # Кэш для ускорения повторного анализа
 
-        # --- ИЗМЕНЕНИЕ: Используем PanedWindow для разделения на левую и правую части ---
+        # --- Используем PanedWindow для разделения на левую и правую части ---
         main_paned_window = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
         main_paned_window.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
         # --- Левая панель для всех элементов управления ---
         left_pane = ttk.Frame(main_paned_window, padding="10")
-        main_paned_window.add(left_pane, weight=1) # weight=1 позволяет панели сжиматься/расширяться
+        main_paned_window.add(left_pane, weight=1)
 
         # --- Правая панель для визуализации ---
         right_pane = ttk.Frame(main_paned_window, padding="10")
-        main_paned_window.add(right_pane, weight=4) # weight=4 делает ее в 4 раза "шире" по умолчанию
+        main_paned_window.add(right_pane, weight=4)
 
         # --- Наполняем ЛЕВУЮ панель ---
         load_button = ttk.Button(left_pane, text="Load Tensors from DB", command=self._load_tensors_metadata)
@@ -301,35 +296,43 @@ class TensorTab(ttk.Frame):
         selection_frame = ttk.LabelFrame(left_pane, text="Tensor Selection", padding="10")
         selection_frame.pack(fill=tk.BOTH, expand=True)
 
-        # Treeview для первого тензора
+        # 1. Treeview для первого тензора
         ttk.Label(selection_frame, text="1. Select First Tensor:").pack(anchor='w')
-        
         tree_container = ttk.Frame(selection_frame)
         tree_container.pack(fill=tk.BOTH, expand=True, pady=5)
-
         self.tree = ttk.Treeview(tree_container, selectmode="browse")
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
         scrollbar = ttk.Scrollbar(tree_container, orient="vertical", command=self.tree.yview)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree.configure(yscrollcommand=scrollbar.set)
-        
         self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
 
-        # Combobox для второго тензора
+        # 2. Кнопка "Анализ"
+        self.analyze_button = ttk.Button(selection_frame, text="Analyze Differences", command=self._run_analysis, state="disabled")
+        self.analyze_button.pack(fill=tk.X, pady=(10, 5))
+
+        # 3. Listbox для второго тензора
         ttk.Label(selection_frame, text="2. Select Second Tensor:").pack(anchor='w', pady=(10, 0))
-        self.second_tensor_combo = ttk.Combobox(selection_frame, state="disabled")
-        self.second_tensor_combo.pack(fill=tk.X, expand=True, pady=5)
-        self.second_tensor_combo.bind("<<ComboboxSelected>>", self._on_second_tensor_select)
-        
+        list_container = ttk.Frame(selection_frame)
+        list_container.pack(fill=tk.BOTH, expand=True, pady=5)
+        self.second_tensor_listbox = tk.Listbox(list_container, selectmode=tk.SINGLE, exportselection=False)
+        self.second_tensor_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        list_scrollbar = ttk.Scrollbar(list_container, orient="vertical", command=self.second_tensor_listbox.yview)
+        list_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.second_tensor_listbox.config(yscrollcommand=list_scrollbar.set)
+        self.second_tensor_listbox.bind('<<ListboxSelect>>', self._on_listbox_select)
+
+        # 4. Индикатор прогресса
+        self.progress_bar = ttk.Progressbar(selection_frame, orient='horizontal', mode='determinate')
+        self.progress_bar.pack(fill=tk.X, pady=5)
+
         # --- Наполняем ПРАВУЮ панель ---
         result_frame = ttk.LabelFrame(right_pane, text="Resulting Difference Tensor", padding="10")
         result_frame.pack(fill=tk.BOTH, expand=True)
-
         self.tensor_viewer = TensorViewer(result_frame)
 
     def _load_tensors_metadata(self):
-        """Загружает метаданные и строит иерархию в Treeview."""
+        # ... (этот метод без изменений)
         try:
             conn = sqlite3.connect('debug.db')
             cursor = conn.cursor()
@@ -345,14 +348,12 @@ class TensorTab(ttk.Frame):
         except sqlite3.OperationalError as e:
             messagebox.showerror("Database Error", f"Could not read tensor metadata.\nError: {e}")
             return
-
         if not tensor_metadata:
             messagebox.showinfo("No Data", "No tensors found.")
             return
-
         self.tree.delete(*self.tree.get_children())
         self.tensor_map.clear()
-
+        self.blob_cache.clear()
         node_map = {}
         for row in tensor_metadata:
             full_name = row[0]
@@ -360,7 +361,6 @@ class TensorTab(ttk.Frame):
                 "tensor_id": row[1], "datatype": row[2], "dims": row[3], 
                 "shape": tuple(s for s in row[4:9] if s > 0)
             }
-            
             parts = full_name.split('.')
             parent_iid = ''
             current_path = ''
@@ -370,57 +370,98 @@ class TensorTab(ttk.Frame):
                     iid = self.tree.insert(parent_iid, 'end', text=part, open=False)
                     node_map[current_path] = iid
                 parent_iid = node_map[current_path]
-
-        self.second_tensor_combo.set('')
-        self.second_tensor_combo['values'] = []
-        self.second_tensor_combo.config(state="disabled")
+        self.second_tensor_listbox.delete(0, tk.END)
+        self.analyze_button.config(state="disabled")
         self.tensor_viewer.set_tensor(None)
         messagebox.showinfo("Success", f"{len(tensor_metadata)} tensor metadata entries loaded.")
 
     def _on_tree_select(self, event=None):
-        """Срабатывает при выборе элемента в Treeview."""
         selection = self.tree.selection()
         if not selection: return
-        
         selected_iid = selection[0]
         if self.tree.get_children(selected_iid):
+            self.analyze_button.config(state="disabled")
             return
-
-        path_parts = []
-        current_iid = selected_iid
-        while current_iid:
-            path_parts.append(self.tree.item(current_iid, 'text'))
-            current_iid = self.tree.parent(current_iid)
         
-        full_name = ".".join(reversed(path_parts))
+        full_name = self._get_fullname_from_tree(selected_iid)
         print(f"Selected first tensor: {full_name}")
-
-        base_name_parts = full_name.split('.')[:-1]
-        base_name = ".".join(base_name_parts)
-
+        base_name = ".".join(full_name.split('.')[:-1])
         compatible_tensors = [name for name in self.tensor_map if name.startswith(base_name + '.')]
         
-        self.second_tensor_combo['values'] = compatible_tensors
-        self.second_tensor_combo.config(state="readonly")
-        self.second_tensor_combo.set('')
+        self.second_tensor_listbox.delete(0, tk.END)
+        for name in compatible_tensors:
+            self.second_tensor_listbox.insert(tk.END, name)
+        
+        self.analyze_button.config(state="normal")
         self.tensor_viewer.set_tensor(None)
 
-    def _on_second_tensor_select(self, event=None):
+    def _run_analysis(self):
+        """Запускает анализ MSE и раскрашивает список."""
         selection = self.tree.selection()
+        if not selection:
+            messagebox.showwarning("Warning", "Please select a base tensor from the tree first.")
+            return
+        
+        tensor1_name = self._get_fullname_from_tree(selection[0])
+        tensor1 = self._get_tensor_as_numpy(tensor1_name)
+        if tensor1 is None: return
+
+        compatible_names = self.second_tensor_listbox.get(0, tk.END)
+        
+        results = []
+        self.progress_bar['maximum'] = len(compatible_names)
+        self.progress_bar['value'] = 0
+
+        for i, name in enumerate(compatible_names):
+            self.progress_bar['value'] = i + 1
+            self.update_idletasks() # Обновляем UI
+            
+            if name == tensor1_name:
+                mse = 0.0
+            else:
+                tensor2 = self._get_tensor_as_numpy(name)
+                if tensor2 is not None and tensor1.shape == tensor2.shape:
+                    mse = np.mean((tensor1 - tensor2) ** 2)
+                else:
+                    mse = -1 # Ошибка
+            results.append(mse)
+
+        max_mse = max(results) if any(r > 0 for r in results) else 1.0
+
+        for i, mse in enumerate(results):
+            if mse >= 0:
+                # Нормализуем MSE от 0 до 1
+                norm_mse = mse / max_mse
+                # Преобразуем в цвет от белого (#FFFFFF) до красного (#FF0000)
+                # Уменьшаем зеленую и синюю компоненты
+                gb_val = int(255 * (1 - norm_mse))
+                color = f'#FF{gb_val:02x}{gb_val:02x}'
+                self.second_tensor_listbox.itemconfigure(i, {'bg': color})
+            else:
+                self.second_tensor_listbox.itemconfigure(i, {'bg': 'gray'}) # Ошибка
+        
+        self.progress_bar['value'] = 0
+
+    def _on_listbox_select(self, event=None):
+        selection = self.second_tensor_listbox.curselection()
         if not selection: return
         
-        selected_iid = selection[0]
-        path_parts = []
-        current_iid = selected_iid
-        while current_iid:
-            path_parts.append(self.tree.item(current_iid, 'text'))
-            current_iid = self.tree.parent(current_iid)
+        tensor2_name = self.second_tensor_listbox.get(selection[0])
         
-        tensor1_name = ".".join(reversed(path_parts))
-        tensor2_name = self.second_tensor_combo.get()
+        tree_selection = self.tree.selection()
+        if not tree_selection: return
+        tensor1_name = self._get_fullname_from_tree(tree_selection[0])
 
         if not tensor1_name or not tensor2_name: return
         self._calculate_and_display_diff(tensor1_name, tensor2_name)
+
+    def _get_fullname_from_tree(self, iid):
+        """Вспомогательная функция для получения полного имени из Treeview."""
+        path_parts = []
+        while iid:
+            path_parts.append(self.tree.item(iid, 'text'))
+            iid = self.tree.parent(iid)
+        return ".".join(reversed(path_parts))
 
     def _fetch_blob_by_id(self, tensor_id):
         try:
@@ -437,13 +478,21 @@ class TensorTab(ttk.Frame):
     def _get_tensor_as_numpy(self, name):
         info = self.tensor_map.get(name)
         if not info: return None
-        blob = self._fetch_blob_by_id(info['tensor_id'])
+        
+        tensor_id = info['tensor_id']
+        if tensor_id in self.blob_cache:
+            return self.blob_cache[tensor_id]
+
+        blob = self._fetch_blob_by_id(tensor_id)
         if blob is None: return None
+        
         shape = info['shape']
         dtype = np.float32 if info['datatype'] == 0 else np.int32
         try:
             arr_1d = np.frombuffer(blob, dtype=dtype)
-            return arr_1d.reshape(shape)
+            tensor = arr_1d.reshape(shape)
+            self.blob_cache[tensor_id] = tensor # Сохраняем в кэш
+            return tensor
         except Exception as e:
             messagebox.showerror("Tensor Conversion Error", f"Failed to convert tensor '{name}'.\nError: {e}")
             return None
