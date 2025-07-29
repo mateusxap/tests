@@ -7,11 +7,10 @@ from collections import defaultdict
 import numpy as np
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
-from skimage.measure import block_reduce # Для max-пулинга
+from skimage.measure import block_reduce # Для max-пулингаА
 # =====================================================================================
 #  ФИНАЛЬНАЯ ВЕРСИЯ с обработкой 0D и 1D тензоров
 # =====================================================================================
-
 class TensorViewer(ttk.Frame):
     def __init__(self, parent):
         super().__init__(parent)
@@ -270,6 +269,12 @@ class TensorViewer(ttk.Frame):
             self.ax.set_ylabel(y_label)
         self.canvas.get_tk_widget().after(1, self._center_and_set_view)
 # =====================================================================================
+# =====================================================================================
+#  Вкладка для анализа тензоров с использованием Treeview для выбора
+# =====================================================================================
+# =====================================================================================
+#  Вкладка для анализа тензоров с компоновкой "панель слева, график справа"
+# =====================================================================================
 class TensorTab(ttk.Frame):
     def __init__(self, parent):
         super().__init__(parent)
@@ -277,99 +282,123 @@ class TensorTab(ttk.Frame):
 
         self.tensor_map = {}
 
-        main_frame = ttk.Frame(self, padding="10")
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        # --- ИЗМЕНЕНИЕ: Используем PanedWindow для разделения на левую и правую части ---
+        main_paned_window = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
+        main_paned_window.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        control_frame = ttk.Frame(main_frame)
-        control_frame.pack(fill=tk.X, pady=(0, 20))
+        # --- Левая панель для всех элементов управления ---
+        left_pane = ttk.Frame(main_paned_window, padding="10")
+        main_paned_window.add(left_pane, weight=1) # weight=1 позволяет панели сжиматься/расширяться
+
+        # --- Правая панель для визуализации ---
+        right_pane = ttk.Frame(main_paned_window, padding="10")
+        main_paned_window.add(right_pane, weight=4) # weight=4 делает ее в 4 раза "шире" по умолчанию
+
+        # --- Наполняем ЛЕВУЮ панель ---
+        load_button = ttk.Button(left_pane, text="Load Tensors from DB", command=self._load_tensors_metadata)
+        load_button.pack(fill=tk.X, pady=(0, 10))
+
+        selection_frame = ttk.LabelFrame(left_pane, text="Tensor Selection", padding="10")
+        selection_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Treeview для первого тензора
+        ttk.Label(selection_frame, text="1. Select First Tensor:").pack(anchor='w')
         
-        load_button = ttk.Button(control_frame, text="Load Tensors from DB", command=self._load_tensors_metadata)
-        load_button.pack(side=tk.LEFT)
+        tree_container = ttk.Frame(selection_frame)
+        tree_container.pack(fill=tk.BOTH, expand=True, pady=5)
 
-        selection_frame = ttk.LabelFrame(main_frame, text="Tensor Selection", padding="10")
-        selection_frame.pack(fill=tk.X)
-
-        # --- ИЗМЕНЕНИЕ: Переход от grid к pack для кросс-платформенной надежности ---
+        self.tree = ttk.Treeview(tree_container, selectmode="browse")
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
-        # --- Строка 1 ---
-        row1_frame = ttk.Frame(selection_frame)
-        row1_frame.pack(fill=tk.X, expand=True, pady=2)
+        scrollbar = ttk.Scrollbar(tree_container, orient="vertical", command=self.tree.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tree.configure(yscrollcommand=scrollbar.set)
         
-        ttk.Label(row1_frame, text="1. Select First Tensor:").pack(side=tk.LEFT, padx=5)
-        self.first_tensor_combo = ttk.Combobox(row1_frame, state="readonly", width=50)
-        # fill=tk.X и expand=True заставляют комбобокс занять все оставшееся место
-        self.first_tensor_combo.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        self.first_tensor_combo.bind("<<ComboboxSelected>>", self._on_first_tensor_select)
+        self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
 
-        # --- Строка 2 ---
-        row2_frame = ttk.Frame(selection_frame)
-        row2_frame.pack(fill=tk.X, expand=True, pady=2)
-
-        ttk.Label(row2_frame, text="2. Select Second Tensor (for comparison):").pack(side=tk.LEFT, padx=5)
-        self.second_tensor_combo = ttk.Combobox(row2_frame, state="disabled", width=50)
-        self.second_tensor_combo.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        # Combobox для второго тензора
+        ttk.Label(selection_frame, text="2. Select Second Tensor:").pack(anchor='w', pady=(10, 0))
+        self.second_tensor_combo = ttk.Combobox(selection_frame, state="disabled")
+        self.second_tensor_combo.pack(fill=tk.X, expand=True, pady=5)
         self.second_tensor_combo.bind("<<ComboboxSelected>>", self._on_second_tensor_select)
         
-        # selection_frame.columnconfigure(1, weight=1) # Больше не нужно для pack
-
-        result_frame = ttk.LabelFrame(main_frame, text="Resulting Difference Tensor", padding="10")
-        result_frame.pack(fill=tk.BOTH, expand=True, pady=(20, 0))
+        # --- Наполняем ПРАВУЮ панель ---
+        result_frame = ttk.LabelFrame(right_pane, text="Resulting Difference Tensor", padding="10")
+        result_frame.pack(fill=tk.BOTH, expand=True)
 
         self.tensor_viewer = TensorViewer(result_frame)
 
     def _load_tensors_metadata(self):
-        """ИЗМЕНЕНИЕ: Загружает ТОЛЬКО метаданные, без BLOB."""
+        """Загружает метаданные и строит иерархию в Treeview."""
         try:
             conn = sqlite3.connect('debug.db')
             cursor = conn.cursor()
-            # ИЗМЕНЕНИЕ: Убрали T.Data из запроса
             query = """
-                SELECT
-                    T.Name, N.RecordID, T.ID as TensorID, T.Datatype, T.NumDims,
-                    T.Shape0, T.Shape1, T.Shape2, T.Shape3, T.Shape4
+                SELECT T.Name, T.ID as TensorID, T.Datatype, T.NumDims,
+                       T.Shape0, T.Shape1, T.Shape2, T.Shape3, T.Shape4
                 FROM Tensors T
-                JOIN TensorMap TM ON T.ID = TM.TensorID
-                JOIN Nodes N ON TM.NodeID = N.id
-                WHERE T.Name IS NOT NULL AND T.Name != ''
-                ORDER BY T.Name, N.RecordID
+                WHERE T.Name IS NOT NULL AND T.Name != '' ORDER BY T.Name
             """
             cursor.execute(query)
             tensor_metadata = cursor.fetchall()
             conn.close()
         except sqlite3.OperationalError as e:
-            messagebox.showerror("Database Error", f"Could not read tensor metadata from 'debug.db'.\nError: {e}")
+            messagebox.showerror("Database Error", f"Could not read tensor metadata.\nError: {e}")
             return
 
         if not tensor_metadata:
-            messagebox.showinfo("No Data", "No tensors found in the database.")
+            messagebox.showinfo("No Data", "No tensors found.")
             return
 
+        self.tree.delete(*self.tree.get_children())
         self.tensor_map.clear()
-        display_names = []
+
+        node_map = {}
         for row in tensor_metadata:
-            display_name = f"{row[0]} (Record: {row[1]})"
-            display_names.append(display_name)
-            # ИЗМЕНЕНИЕ: Не храним "blob" в словаре
-            self.tensor_map[display_name] = {
-                "name": row[0], "record_id": row[1], "tensor_id": row[2],
-                "datatype": row[3], "dims": row[4], 
-                "shape": tuple(s for s in row[5:10] if s > 0)
+            full_name = row[0]
+            self.tensor_map[full_name] = {
+                "tensor_id": row[1], "datatype": row[2], "dims": row[3], 
+                "shape": tuple(s for s in row[4:9] if s > 0)
             }
-        
-        self.first_tensor_combo['values'] = display_names
-        self.first_tensor_combo.set('')
+            
+            parts = full_name.split('.')
+            parent_iid = ''
+            current_path = ''
+            for part in parts:
+                current_path = f"{current_path}.{part}" if current_path else part
+                if current_path not in node_map:
+                    iid = self.tree.insert(parent_iid, 'end', text=part, open=False)
+                    node_map[current_path] = iid
+                parent_iid = node_map[current_path]
+
         self.second_tensor_combo.set('')
         self.second_tensor_combo['values'] = []
         self.second_tensor_combo.config(state="disabled")
         self.tensor_viewer.set_tensor(None)
-        messagebox.showinfo("Success", f"{len(display_names)} tensor metadata entries loaded successfully.")
+        messagebox.showinfo("Success", f"{len(tensor_metadata)} tensor metadata entries loaded.")
 
-    def _on_first_tensor_select(self, event=None):
-        selected_display_name = self.first_tensor_combo.get()
-        if not selected_display_name: return
+    def _on_tree_select(self, event=None):
+        """Срабатывает при выборе элемента в Treeview."""
+        selection = self.tree.selection()
+        if not selection: return
+        
+        selected_iid = selection[0]
+        if self.tree.get_children(selected_iid):
+            return
 
-        base_name = self.tensor_map[selected_display_name]["name"]
-        compatible_tensors = [dn for dn, info in self.tensor_map.items() if info["name"] == base_name]
+        path_parts = []
+        current_iid = selected_iid
+        while current_iid:
+            path_parts.append(self.tree.item(current_iid, 'text'))
+            current_iid = self.tree.parent(current_iid)
+        
+        full_name = ".".join(reversed(path_parts))
+        print(f"Selected first tensor: {full_name}")
+
+        base_name_parts = full_name.split('.')[:-1]
+        base_name = ".".join(base_name_parts)
+
+        compatible_tensors = [name for name in self.tensor_map if name.startswith(base_name + '.')]
         
         self.second_tensor_combo['values'] = compatible_tensors
         self.second_tensor_combo.config(state="readonly")
@@ -377,38 +406,39 @@ class TensorTab(ttk.Frame):
         self.tensor_viewer.set_tensor(None)
 
     def _on_second_tensor_select(self, event=None):
-        tensor1_name = self.first_tensor_combo.get()
+        selection = self.tree.selection()
+        if not selection: return
+        
+        selected_iid = selection[0]
+        path_parts = []
+        current_iid = selected_iid
+        while current_iid:
+            path_parts.append(self.tree.item(current_iid, 'text'))
+            current_iid = self.tree.parent(current_iid)
+        
+        tensor1_name = ".".join(reversed(path_parts))
         tensor2_name = self.second_tensor_combo.get()
+
         if not tensor1_name or not tensor2_name: return
         self._calculate_and_display_diff(tensor1_name, tensor2_name)
 
     def _fetch_blob_by_id(self, tensor_id):
-        """НОВЫЙ МЕТОД: Делает точечный запрос в БД для получения одного BLOB."""
         try:
             conn = sqlite3.connect('debug.db')
             cursor = conn.cursor()
             cursor.execute("SELECT Data FROM Tensors WHERE ID = ?", (tensor_id,))
             result = cursor.fetchone()
             conn.close()
-            if result:
-                return result[0]
-            else:
-                messagebox.showerror("Data Error", f"Could not find BLOB for TensorID {tensor_id}.")
-                return None
+            return result[0] if result else None
         except sqlite3.OperationalError as e:
             messagebox.showerror("Database Error", f"Failed to fetch BLOB for TensorID {tensor_id}.\nError: {e}")
             return None
 
     def _get_tensor_as_numpy(self, name):
-        """ИЗМЕНЕНИЕ: Теперь сначала получает BLOB, потом конвертирует."""
-        info = self.tensor_map[name]
-        
-        # 1. Получаем BLOB из БД по ID
+        info = self.tensor_map.get(name)
+        if not info: return None
         blob = self._fetch_blob_by_id(info['tensor_id'])
-        if blob is None:
-            return None
-
-        # 2. Конвертируем (остальная логика без изменений)
+        if blob is None: return None
         shape = info['shape']
         dtype = np.float32 if info['datatype'] == 0 else np.int32
         try:
@@ -419,24 +449,17 @@ class TensorTab(ttk.Frame):
             return None
 
     def _calculate_and_display_diff(self, name1, name2):
-        # Этот метод теперь работает с "ленивой" загрузкой без изменений
         tensor1 = self._get_tensor_as_numpy(name1)
         tensor2 = self._get_tensor_as_numpy(name2)
-
         if tensor1 is None or tensor2 is None:
             self.tensor_viewer.set_tensor(None)
             return
-
         if tensor1.shape != tensor2.shape:
-            messagebox.showerror("Shape Mismatch", f"Tensors have incompatible shapes.\n"
-                                                   f"{name1}: {tensor1.shape}\n"
-                                                   f"{name2}: {tensor2.shape}")
+            messagebox.showerror("Shape Mismatch", f"Tensors have incompatible shapes.\n{name1}: {tensor1.shape}\n{name2}: {tensor2.shape}")
             self.tensor_viewer.set_tensor(None)
             return
-
         diff_tensor = np.abs(tensor1 - tensor2)
         self.tensor_viewer.set_tensor(diff_tensor)
-
 # =====================================================================================
 #  Старая вкладка с диаграммой Ганта (без изменений)
 # =====================================================================================
