@@ -278,6 +278,8 @@ class TensorTab(ttk.Frame):
         self.pack(fill="both", expand=True)
 
         self.tensor_map = {}
+        # --- НОВОЕ: Словарь для хранения результатов анализа (MSE) ---
+        self.mse_results = {}
 
         # --- Используем PanedWindow для разделения на левую и правую части ---
         main_paned_window = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
@@ -292,8 +294,18 @@ class TensorTab(ttk.Frame):
         main_paned_window.add(right_pane, weight=4)
 
         # --- Наполняем ЛЕВУЮ панель ---
-        load_button = ttk.Button(left_pane, text="Load Tensors from DB", command=self._load_tensors_metadata)
-        load_button.pack(fill=tk.X, pady=(0, 10))
+        
+        # --- ИЗМЕНЕНИЕ: Добавляем фрейм для кнопок ---
+        buttons_frame = ttk.Frame(left_pane)
+        buttons_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        load_button = ttk.Button(buttons_frame, text="Load Tensors from DB", command=self._load_tensors_metadata)
+        load_button.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # --- НОВАЯ КНОПКА АНАЛИЗА ---
+        analyze_button = ttk.Button(buttons_frame, text="Analyze Differences", command=self._perform_analysis)
+        analyze_button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
+
 
         selection_frame = ttk.LabelFrame(left_pane, text="Tensor Selection", padding="10")
         selection_frame.pack(fill=tk.BOTH, expand=True)
@@ -320,12 +332,129 @@ class TensorTab(ttk.Frame):
         result_frame.pack(fill=tk.BOTH, expand=True)
         self.tensor_viewer = TensorViewer(result_frame)
 
+    # --- НОВЫЙ МЕТОД: Запуск анализа ---
+    def _perform_analysis(self):
+        """
+        Выполняет анализ среднеквадратичного отклонения для всех тензоров
+        с одинаковыми базовыми именами и формами.
+        """
+        if not self.tensor_map:
+            messagebox.showwarning("No Data", "Please load tensor metadata first.")
+            return
+
+        self.mse_results.clear()
+        
+        # 1. Группируем тензоры по базовому имени и форме
+        groups = defaultdict(list)
+        for full_name, info in self.tensor_map.items():
+            key = (info['base_name'], info['shape'])
+            groups[key].append(full_name)
+
+        # 2. Вычисляем MSE для каждой группы
+        for key, tensor_names in groups.items():
+            if len(tensor_names) < 2:
+                continue
+
+            # Берем первый тензор как эталонный
+            ref_name = tensor_names[0]
+            tensor1 = self._get_tensor_as_numpy(ref_name)
+            if tensor1 is None:
+                print(f"Warning: Could not load reference tensor {ref_name} for analysis.")
+                continue
+
+            # Сравниваем с остальными в группе
+            for i in range(1, len(tensor_names)):
+                comp_name = tensor_names[i]
+                tensor2 = self._get_tensor_as_numpy(comp_name)
+                if tensor2 is None:
+                    print(f"Warning: Could not load comparison tensor {comp_name} for analysis.")
+                    continue
+                
+                # Расчет среднеквадратичной ошибки (MSE)
+                mse = np.mean((tensor1 - tensor2) ** 2)
+                self.mse_results[comp_name] = mse
+        
+        # 3. Обновляем цвета в дереве
+        self._update_tree_colors()
+        messagebox.showinfo("Analysis Complete", f"Calculated MSE for {len(self.mse_results)} tensors.")
+
+    # --- НОВЫЙ МЕТОД: Раскраска дерева ---
+    def _update_tree_colors(self):
+        """Обновляет цвета фона элементов Treeview на основе результатов MSE."""
+        # Сначала сбрасываем все цвета
+        self._clear_tree_colors(self.tree.get_children())
+
+        if not self.mse_results:
+            return
+
+        max_mse = max(self.mse_results.values()) if self.mse_results else 0
+
+        # Рекурсивно применяем цвета от листьев к корню
+        for item_id in self.tree.get_children(""):
+            self._propagate_colors(item_id, max_mse)
+
+    # --- НОВЫЙ МЕТОД: Рекурсивное применение цветов ---
+    def _propagate_colors(self, item_id, max_mse):
+        """
+        Рекурсивно обходит дерево, раскрашивая листья и передавая
+        максимальное отклонение родительским узлам.
+        """
+        children = self.tree.get_children(item_id)
+        
+        if not children:  # Это лист (конкретный тензор)
+            full_name = self._get_fullname_from_tree(item_id)
+            mse = self.mse_results.get(full_name)
+            if mse is not None:
+                color = self._get_color_from_mse(mse, max_mse)
+                self.tree.item(item_id, tags=('has_diff',))
+                self.tree.tag_configure('has_diff', background=color)
+                return mse
+            return 0.0
+        else:  # Это родительский узел
+            max_child_mse = 0.0
+            for child_id in children:
+                child_mse = self._propagate_colors(child_id, max_mse)
+                if child_mse > max_child_mse:
+                    max_child_mse = child_mse
+            
+            if max_child_mse > 0:
+                color = self._get_color_from_mse(max_child_mse, max_mse)
+                self.tree.item(item_id, tags=('has_diff_parent',))
+                self.tree.tag_configure('has_diff_parent', background=color)
+            
+            return max_child_mse
+
+    # --- НОВЫЙ МЕТОД: Генерация цвета на основе MSE ---
+    def _get_color_from_mse(self, mse, max_mse):
+        """Генерирует цвет от белого до красного в зависимости от величины ошибки."""
+        if max_mse == 0:
+            return '#ffffff' # Белый
+        
+        # Нормализуем ошибку от 0 до 1
+        normalized_error = min(mse / max_mse, 1.0)
+        
+        # Преобразуем в интенсивность для зеленого и синего каналов (от 255 до 50)
+        # Чем больше ошибка, тем меньше зеленого и синего, что делает цвет краснее
+        intensity = 255 - int(normalized_error * 205) # 255 - 205 = 50
+        
+        # Формируем hex-код цвета (например, #ff_ee_ee -> #ff_32_32)
+        hex_code = f'#ff{intensity:02x}{intensity:02x}'
+        return hex_code
+
+    # --- НОВЫЙ МЕТОД: Очистка цветов в дереве ---
+    def _clear_tree_colors(self, item_ids):
+        """Рекурсивно удаляет теги раскраски со всех элементов дерева."""
+        for item_id in item_ids:
+            self.tree.item(item_id, tags=())
+            children = self.tree.get_children(item_id)
+            if children:
+                self._clear_tree_colors(children)
+
     def _load_tensors_metadata(self):
         """Загружает метаданные и строит иерархию в Treeview."""
         try:
             conn = sqlite3.connect('debug.db')
             cursor = conn.cursor()
-            # Используем ваш оригинальный, правильный SQL-запрос
             query = """
                 SELECT
                     T.Name, N.RecordID, T.ID as TensorID, T.Datatype, T.NumDims,
@@ -347,14 +476,14 @@ class TensorTab(ttk.Frame):
             messagebox.showinfo("No Data", "No tensors found.")
             return
 
+        # --- ИЗМЕНЕНИЕ: Очищаем старые результаты анализа при загрузке ---
+        self.mse_results.clear()
         self.tree.delete(*self.tree.get_children())
         self.tensor_map.clear()
 
         node_map = {}
         for row in tensor_metadata:
             base_name, record_id = row[0], row[1]
-            
-            # --- ИЗМЕНЕНИЕ: Программно создаем иерархическое имя ---
             full_name = f"{base_name}.{record_id}"
             
             self.tensor_map[full_name] = {
@@ -366,7 +495,6 @@ class TensorTab(ttk.Frame):
                 "shape": tuple(s for s in row[5:10] if s > 0)
             }
             
-            # Строим дерево на основе нового полного имени
             parts = full_name.split('.')
             parent_iid = ''
             current_path = ''
@@ -395,7 +523,6 @@ class TensorTab(ttk.Frame):
         selected_info = self.tensor_map.get(full_name)
         if not selected_info: return
 
-        # --- ИЗМЕНЕНИЕ: Ищем совместимые тензоры по базовому имени и форме ---
         base_name = selected_info["base_name"]
         current_shape = selected_info["shape"]
         
