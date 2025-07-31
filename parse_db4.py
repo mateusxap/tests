@@ -270,48 +270,68 @@ class TensorViewer(ttk.Frame):
         self.canvas.get_tk_widget().after(1, self._center_and_set_view)
 
 # =====================================================================================
-#  Вкладка для анализа тензоров с Treeview и правильным SQL-запросом
+#  Вкладка для анализа тензоров с ИСПРАВЛЕННЫМ контекстным меню и сравнением
+# =====================================================================================
+import tkinter as tk
+from tkinter import ttk, messagebox
+import sqlite3
+from collections import defaultdict
+import numpy as np
+
+# Предполагается, что класс TensorViewer определен в вашем файле
+# Если нет, вы можете временно заменить его заглушкой для тестирования, например:
+# class TensorViewer(ttk.Frame):
+#     def __init__(self, parent):
+#         super().__init__(parent)
+#         ttk.Label(self, text="Tensor Viewer Area").pack(expand=True)
+#     def set_tensor(self, tensor_data):
+#         print("Tensor Viewer received data.")
+
+
+# =====================================================================================
+#  ФИНАЛЬНАЯ ВЕРСИЯ: TensorTab с правильным меню выбора рекордов
 # =====================================================================================
 class TensorTab(ttk.Frame):
     def __init__(self, parent):
         super().__init__(parent)
         self.pack(fill="both", expand=True)
 
+        # --- Состояние класса ---
         self.tensor_map = {}
-        # --- НОВОЕ: Словарь для хранения результатов анализа (MSE) ---
         self.mse_results = {}
+        
+        # Храним только простые имена рекордов (e.g., {'rec1', 'rec2'})
+        self.available_records = set()
+        self.record1_for_analysis = None
+        self.record2_for_analysis = None
 
-        # --- Используем PanedWindow для разделения на левую и правую части ---
+        # --- UI: Основная разметка ---
         main_paned_window = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
         main_paned_window.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        # --- Левая панель для всех элементов управления ---
         left_pane = ttk.Frame(main_paned_window, padding="10")
         main_paned_window.add(left_pane, weight=1)
 
-        # --- Правая панель для визуализации ---
         right_pane = ttk.Frame(main_paned_window, padding="10")
         main_paned_window.add(right_pane, weight=4)
 
-        # --- Наполняем ЛЕВУЮ панель ---
-        
-        # --- ИЗМЕНЕНИЕ: Добавляем фрейм для кнопок ---
+        # --- UI: Левая панель ---
         buttons_frame = ttk.Frame(left_pane)
         buttons_frame.pack(fill=tk.X, pady=(0, 10))
         
         load_button = ttk.Button(buttons_frame, text="Load Tensors from DB", command=self._load_tensors_metadata)
         load_button.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        # --- НОВАЯ КНОПКА АНАЛИЗА ---
-        analyze_button = ttk.Button(buttons_frame, text="Analyze Differences", command=self._perform_analysis)
+        analyze_button = ttk.Button(buttons_frame, text="Run Analysis", command=self._perform_record_analysis)
         analyze_button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
 
-
-        selection_frame = ttk.LabelFrame(left_pane, text="Tensor Selection", padding="10")
+        selection_frame = ttk.LabelFrame(left_pane, text="Tensor Selection & Analysis", padding="10")
         selection_frame.pack(fill=tk.BOTH, expand=True)
 
-        # 1. Treeview для первого тензора
-        ttk.Label(selection_frame, text="1. Select First Tensor:").pack(anchor='w')
+        self.analysis_status_label = ttk.Label(selection_frame, text="Right-click on a record (e.g., 'rec1') to select for analysis.", wraplength=300, justify=tk.LEFT)
+        self.analysis_status_label.pack(anchor='w', pady=(0, 10))
+
+        ttk.Label(selection_frame, text="1. Select First Tensor (or right-click a record):").pack(anchor='w')
         tree_container = ttk.Frame(selection_frame)
         tree_container.pack(fill=tk.BOTH, expand=True, pady=5)
         self.tree = ttk.Treeview(tree_container, selectmode="browse")
@@ -319,151 +339,162 @@ class TensorTab(ttk.Frame):
         scrollbar = ttk.Scrollbar(tree_container, orient="vertical", command=self.tree.yview)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree.configure(yscrollcommand=scrollbar.set)
-        self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
+        
+        self.tree.bind("<<TreeviewSelect>>", self._on_tree_left_click)
+        self.tree.bind("<Button-3>", self._on_tree_right_click)
 
-        # 2. Combobox для второго тензора
-        ttk.Label(selection_frame, text="2. Select Second Tensor:").pack(anchor='w', pady=(10, 0))
+        self.context_menu = tk.Menu(self, tearoff=0)
+
+        ttk.Label(selection_frame, text="2. Select Second Tensor (for manual comparison):").pack(anchor='w', pady=(10, 0))
         self.second_tensor_combo = ttk.Combobox(selection_frame, state="disabled")
         self.second_tensor_combo.pack(fill=tk.X, expand=True, pady=5)
         self.second_tensor_combo.bind("<<ComboboxSelected>>", self._on_second_tensor_select)
 
-        # --- Наполняем ПРАВУЮ панель ---
+        # --- UI: Правая панель ---
         result_frame = ttk.LabelFrame(right_pane, text="Resulting Difference Tensor", padding="10")
         result_frame.pack(fill=tk.BOTH, expand=True)
         self.tensor_viewer = TensorViewer(result_frame)
 
-    # --- НОВЫЙ МЕТОД: Запуск анализа ---
-    def _perform_analysis(self):
-        """
-        Выполняет анализ среднеквадратичного отклонения для всех тензоров
-        с одинаковыми базовыми именами и формами.
-        """
-        if not self.tensor_map:
-            messagebox.showwarning("No Data", "Please load tensor metadata first.")
+    # --- Логика анализа по правому клику ---
+
+    def _on_tree_right_click(self, event):
+        """Обрабатывает правый клик, показывая в меню только простые имена рекордов."""
+        iid = self.tree.identify_row(event.y)
+        if not iid: return
+
+        self.tree.selection_set(iid)
+        item_text = self.tree.item(iid, 'text')
+
+        if item_text.startswith('rec') and self.tree.get_children(iid):
+            self.record1_for_analysis = item_text
+            self.record2_for_analysis = None
+            self._update_analysis_status_label()
+            
+            self.context_menu.delete(0, 'end')
+            other_records = sorted([r for r in self.available_records if r != self.record1_for_analysis])
+
+            if not other_records:
+                self.context_menu.add_command(label="No other records to compare", state="disabled")
+            else:
+                for rec_name in other_records:
+                    self.context_menu.add_command(
+                        label=f"Compare with: {rec_name}",
+                        command=lambda r=rec_name: self._set_comparison_record(r)
+                    )
+            self.context_menu.post(event.x_root, event.y_root)
+
+    def _set_comparison_record(self, record_name):
+        """Запоминает второе простое имя рекорда, выбранное из меню."""
+        self.record2_for_analysis = record_name
+        self._update_analysis_status_label()
+
+    def _update_analysis_status_label(self):
+        """Обновляет информационную метку о выбранных для анализа рекордах."""
+        if self.record1_for_analysis and self.record2_for_analysis:
+            text = f"Analysis target:\n- {self.record1_for_analysis}\n- {self.record2_for_analysis}"
+        elif self.record1_for_analysis:
+            text = f"Selected: {self.record1_for_analysis}.\nNow choose a comparison record."
+        else:
+            text = "Right-click on a record (e.g., 'rec1') to select for analysis."
+        self.analysis_status_label.config(text=text)
+
+    def _perform_record_analysis(self):
+        """Выполняет анализ, используя простые имена рекордов для поиска и замены."""
+        if not self.record1_for_analysis or not self.record2_for_analysis:
+            messagebox.showwarning("Selection Missing", "Please select two records for analysis using the right-click context menu.")
             return
 
         self.mse_results.clear()
+        rec1_str = self.record1_for_analysis
+        rec2_str = self.record2_for_analysis
         
-        # 1. Группируем тензоры по базовому имени и форме
-        groups = defaultdict(list)
-        for full_name, info in self.tensor_map.items():
-            key = (info['base_name'], info['shape'])
-            groups[key].append(full_name)
-
-        # 2. Вычисляем MSE для каждой группы
-        for key, tensor_names in groups.items():
-            if len(tensor_names) < 2:
-                continue
-
-            # Берем первый тензор как эталонный
-            ref_name = tensor_names[0]
-            tensor1 = self._get_tensor_as_numpy(ref_name)
-            if tensor1 is None:
-                print(f"Warning: Could not load reference tensor {ref_name} for analysis.")
-                continue
-
-            # Сравниваем с остальными в группе
-            for i in range(1, len(tensor_names)):
-                comp_name = tensor_names[i]
-                tensor2 = self._get_tensor_as_numpy(comp_name)
-                if tensor2 is None:
-                    print(f"Warning: Could not load comparison tensor {comp_name} for analysis.")
-                    continue
+        compared_pairs = 0
+        for name1, info1 in self.tensor_map.items():
+            # Ищем точное вхождение, окруженное точками, чтобы избежать ложных срабатываний
+            # (например, чтобы не сработать на 'rec10' при поиске 'rec1')
+            search_str = f".{rec1_str}."
+            if search_str in name1:
+                name2 = name1.replace(search_str, f".{rec2_str}.")
                 
-                # Расчет среднеквадратичной ошибки (MSE)
-                mse = np.mean((tensor1 - tensor2) ** 2)
-                self.mse_results[comp_name] = mse
+                if name2 in self.tensor_map:
+                    compared_pairs += 1
+                    info2 = self.tensor_map[name2]
+                    if info1['shape'] == info2['shape']:
+                        tensor1, tensor2 = self._get_tensor_as_numpy(name1), self._get_tensor_as_numpy(name2)
+                        if tensor1 is not None and tensor2 is not None:
+                            mse = np.mean((tensor1 - tensor2) ** 2)
+                            if mse > 1e-9: # Порог для игнорирования ошибок машинного округления
+                                self.mse_results[name1] = mse
+                                self.mse_results[name2] = mse
         
-        # 3. Обновляем цвета в дереве
         self._update_tree_colors()
-        messagebox.showinfo("Analysis Complete", f"Calculated MSE for {len(self.mse_results)} tensors.")
+        messagebox.showinfo("Analysis Complete", f"Compared {compared_pairs} tensor pairs. Found {len(self.mse_results)//2} pairs with differences.")
 
-    # --- НОВЫЙ МЕТОД: Раскраска дерева ---
+    # --- Логика раскраски дерева ---
+
     def _update_tree_colors(self):
-        """Обновляет цвета фона элементов Treeview на основе результатов MSE."""
-        # Сначала сбрасываем все цвета
+        """Запускает процесс очистки и рекурсивной раскраски дерева."""
         self._clear_tree_colors(self.tree.get_children())
-
-        if not self.mse_results:
-            return
-
+        if not self.mse_results: return
         max_mse = max(self.mse_results.values()) if self.mse_results else 0
-
-        # Рекурсивно применяем цвета от листьев к корню
         for item_id in self.tree.get_children(""):
             self._propagate_colors(item_id, max_mse)
 
-    # --- НОВЫЙ МЕТОД: Рекурсивное применение цветов ---
     def _propagate_colors(self, item_id, max_mse):
-        """
-        Рекурсивно обходит дерево, раскрашивая листья и передавая
-        максимальное отклонение родительским узлам.
-        """
+        """Рекурсивно раскрашивает узлы: листья по их MSE, родители по max MSE детей."""
         children = self.tree.get_children(item_id)
-        
-        if not children:  # Это лист (конкретный тензор)
+        if not children: # Это лист (тензор)
             full_name = self._get_fullname_from_tree(item_id)
             mse = self.mse_results.get(full_name)
             if mse is not None:
                 color = self._get_color_from_mse(mse, max_mse)
-                self.tree.item(item_id, tags=('has_diff',))
-                self.tree.tag_configure('has_diff', background=color)
+                tag_name = f"diff_{item_id}"
+                self.tree.item(item_id, tags=(tag_name,))
+                self.tree.tag_configure(tag_name, background=color)
                 return mse
             return 0.0
-        else:  # Это родительский узел
+        else: # Это родительский узел
             max_child_mse = 0.0
             for child_id in children:
                 child_mse = self._propagate_colors(child_id, max_mse)
                 if child_mse > max_child_mse:
                     max_child_mse = child_mse
-            
             if max_child_mse > 0:
                 color = self._get_color_from_mse(max_child_mse, max_mse)
-                self.tree.item(item_id, tags=('has_diff_parent',))
-                self.tree.tag_configure('has_diff_parent', background=color)
-            
+                tag_name = f"diff_parent_{item_id}"
+                self.tree.item(item_id, tags=(tag_name,))
+                self.tree.tag_configure(tag_name, background=color)
             return max_child_mse
 
-    # --- НОВЫЙ МЕТОД: Генерация цвета на основе MSE ---
     def _get_color_from_mse(self, mse, max_mse):
         """Генерирует цвет от белого до красного в зависимости от величины ошибки."""
-        if max_mse == 0:
-            return '#ffffff' # Белый
-        
-        # Нормализуем ошибку от 0 до 1
+        if max_mse == 0: return '#ffffff'
         normalized_error = min(mse / max_mse, 1.0)
-        
-        # Преобразуем в интенсивность для зеленого и синего каналов (от 255 до 50)
-        # Чем больше ошибка, тем меньше зеленого и синего, что делает цвет краснее
-        intensity = 255 - int(normalized_error * 205) # 255 - 205 = 50
-        
-        # Формируем hex-код цвета (например, #ff_ee_ee -> #ff_32_32)
-        hex_code = f'#ff{intensity:02x}{intensity:02x}'
-        return hex_code
+        intensity = 255 - int(normalized_error * 205)
+        return f'#ff{intensity:02x}{intensity:02x}'
 
-    # --- НОВЫЙ МЕТОД: Очистка цветов в дереве ---
     def _clear_tree_colors(self, item_ids):
         """Рекурсивно удаляет теги раскраски со всех элементов дерева."""
         for item_id in item_ids:
             self.tree.item(item_id, tags=())
-            children = self.tree.get_children(item_id)
-            if children:
+            if children := self.tree.get_children(item_id):
                 self._clear_tree_colors(children)
 
+    # --- Загрузка данных и ручное сравнение ---
+
     def _load_tensors_metadata(self):
-        """Загружает метаданные и строит иерархию в Treeview."""
+        """Загружает метаданные и отдельно собирает уникальные имена рекордов."""
         try:
             conn = sqlite3.connect('debug.db')
             cursor = conn.cursor()
             query = """
-                SELECT
-                    T.Name, N.RecordID, T.ID as TensorID, T.Datatype, T.NumDims,
-                    T.Shape0, T.Shape1, T.Shape2, T.Shape3, T.Shape4
+                SELECT T.Name, N.RecordID, T.ID as TensorID, T.Datatype, T.NumDims,
+                       T.Shape0, T.Shape1, T.Shape2, T.Shape3, T.Shape4
                 FROM Tensors T
                 JOIN TensorMap TM ON T.ID = TM.TensorID
                 JOIN Nodes N ON TM.NodeID = N.id
                 WHERE T.Name IS NOT NULL AND T.Name != ''
-                ORDER BY T.Name, N.RecordID
+                ORDER BY N.RecordID, T.Name
             """
             cursor.execute(query)
             tensor_metadata = cursor.fetchall()
@@ -476,29 +507,36 @@ class TensorTab(ttk.Frame):
             messagebox.showinfo("No Data", "No tensors found.")
             return
 
-        # --- ИЗМЕНЕНИЕ: Очищаем старые результаты анализа при загрузке ---
+        # Полный сброс состояния
         self.mse_results.clear()
         self.tree.delete(*self.tree.get_children())
         self.tensor_map.clear()
+        self.available_records.clear()
+        self.record1_for_analysis = None
+        self.record2_for_analysis = None
+        self._update_analysis_status_label()
 
         node_map = {}
         for row in tensor_metadata:
-            base_name, record_id = row[0], row[1]
-            full_name = f"{base_name}.{record_id}"
+            base_name, record_id, datatype, num_dims = row[0], row[1], row[3], row[4]
+            
+            # Ваша логика формирования полного имени
+            full_name = f"dt{datatype}.rec{record_id}.{base_name}.dims{num_dims}"
             
             self.tensor_map[full_name] = {
-                "base_name": base_name,
-                "record_id": record_id,
-                "tensor_id": row[2],
-                "datatype": row[3],
-                "dims": row[4], 
+                "base_name": base_name, "record_id": record_id, "tensor_id": row[2],
+                "datatype": datatype, "dims": num_dims, 
                 "shape": tuple(s for s in row[5:10] if s > 0)
             }
             
-            parts = full_name.split('.')
+            # Находим и сохраняем простое имя рекорда
+            record_name_str = f"rec{record_id}"
+            self.available_records.add(record_name_str)
+            
+            # Построение дерева
             parent_iid = ''
             current_path = ''
-            for part in parts:
+            for part in full_name.split('.'):
                 current_path = f"{current_path}.{part}" if current_path else part
                 if current_path not in node_map:
                     iid = self.tree.insert(parent_iid, 'end', text=part, open=False)
@@ -511,25 +549,19 @@ class TensorTab(ttk.Frame):
         self.tensor_viewer.set_tensor(None)
         messagebox.showinfo("Success", f"{len(tensor_metadata)} tensor metadata entries loaded.")
 
-    def _on_tree_select(self, event=None):
+    def _on_tree_left_click(self, event=None):
+        """Обрабатывает выбор тензора (листа) для ручного сравнения."""
         selection = self.tree.selection()
         if not selection: return
         selected_iid = selection[0]
         if self.tree.get_children(selected_iid): return
 
         full_name = self._get_fullname_from_tree(selected_iid)
-        print(f"Selected first tensor: {full_name}")
-
         selected_info = self.tensor_map.get(full_name)
         if not selected_info: return
 
-        base_name = selected_info["base_name"]
-        current_shape = selected_info["shape"]
-        
-        compatible_tensors = []
-        for name, info in self.tensor_map.items():
-            if info["base_name"] == base_name and info["shape"] == current_shape:
-                compatible_tensors.append(name)
+        base_name, current_shape = selected_info["base_name"], selected_info["shape"]
+        compatible_tensors = [name for name, info in self.tensor_map.items() if info["base_name"] == base_name and info["shape"] == current_shape]
         
         self.second_tensor_combo['values'] = compatible_tensors
         self.second_tensor_combo.config(state="readonly")
@@ -537,16 +569,18 @@ class TensorTab(ttk.Frame):
         self.tensor_viewer.set_tensor(None)
 
     def _on_second_tensor_select(self, event=None):
+        """Выполняет ручное сравнение при выборе из Combobox."""
         selection = self.tree.selection()
         if not selection: return
-        
         tensor1_name = self._get_fullname_from_tree(selection[0])
         tensor2_name = self.second_tensor_combo.get()
-
         if not tensor1_name or not tensor2_name: return
         self._calculate_and_display_diff(tensor1_name, tensor2_name)
 
+    # --- Вспомогательные методы ---
+
     def _get_fullname_from_tree(self, iid):
+        """Собирает полный путь к элементу дерева по его iid."""
         path_parts = []
         while iid:
             path_parts.append(self.tree.item(iid, 'text'))
@@ -554,6 +588,7 @@ class TensorTab(ttk.Frame):
         return ".".join(reversed(path_parts))
 
     def _fetch_blob_by_id(self, tensor_id):
+        """Получает BLOB-данные тензора из БД по его ID."""
         try:
             conn = sqlite3.connect('debug.db')
             cursor = conn.cursor()
@@ -566,20 +601,22 @@ class TensorTab(ttk.Frame):
             return None
 
     def _get_tensor_as_numpy(self, name):
+        """Конвертирует BLOB-данные в тензор NumPy."""
         info = self.tensor_map.get(name)
         if not info: return None
         blob = self._fetch_blob_by_id(info['tensor_id'])
         if blob is None: return None
+        
         shape = info['shape']
         dtype = np.float32 if info['datatype'] == 0 else np.int32
         try:
-            arr_1d = np.frombuffer(blob, dtype=dtype)
-            return arr_1d.reshape(shape)
+            return np.frombuffer(blob, dtype=dtype).reshape(shape)
         except Exception as e:
             messagebox.showerror("Tensor Conversion Error", f"Failed to convert tensor '{name}'.\nError: {e}")
             return None
 
     def _calculate_and_display_diff(self, name1, name2):
+        """Вычисляет и отображает разницу между двумя тензорами."""
         tensor1 = self._get_tensor_as_numpy(name1)
         tensor2 = self._get_tensor_as_numpy(name2)
         if tensor1 is None or tensor2 is None:
